@@ -1,0 +1,9 @@
+apiVersion: platform.example.org/v1alpha1
+kind: ServiceDeployment
+set:
+  - path: spec.artifact.ref
+    value: "{{ .Freight.Ref }}"
+  - path: spec.artifact.version
+    value: '{{ index .Freight.Annotations "org.opencontainers.image.version" }}'
+  - path: metadata.annotations["ship.dev/freight"]
+    value: "{{ .Freight.Digest }}"

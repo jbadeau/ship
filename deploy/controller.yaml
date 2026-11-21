@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: ship-system }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ship-controller, namespace: ship-system }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ship-controller } }
+  template:
+    metadata: { labels: { app: ship-controller } }
+    spec:
+      serviceAccountName: ship-controller
+      containers:
+        - name: controller
+          image: registry.example.com/platform/ship:latest
+          args: [ship, controller]
+          env:
+            - { name: SHIP_GITLAB_URL, value: https://gitlab.example.com }
+            - { name: SHIP_LEDGER_PROJECT, value: platform/ledger }
+            - { name: SHIP_STATUS_CHECK_ID, value: "0" }   # set to the ledger project's external status check id
+            - name: SHIP_GITLAB_TOKEN                       # ship-promoter
+              valueFrom: { secretKeyRef: { name: ship-promoter, key: token } }
+          volumeMounts: [{ name: cache, mountPath: /tmp }]
+          securityContext: { readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false }
+      volumes: [{ name: cache, emptyDir: {} }]

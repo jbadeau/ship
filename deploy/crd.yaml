@@ -1,0 +1,59 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: promotions.ship.dev
+spec:
+  group: ship.dev
+  names:
+    kind: Promotion
+    listKind: PromotionList
+    plural: promotions
+    singular: promotion
+    shortNames: [promo]
+    categories: [ship]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: App, type: string, jsonPath: .spec.app }
+        - { name: Stage, type: string, jsonPath: .spec.stage }
+        - { name: Freight, type: string, jsonPath: .status.freight, priority: 1 }
+        - { name: Phase, type: string, jsonPath: .status.phase }
+        - { name: Approved, type: string, jsonPath: '.status.conditions[?(@.type=="Approved")].status' }
+        - { name: MR, type: string, jsonPath: .status.ledgerMR.url }
+        - { name: Requested-By, type: string, jsonPath: .spec.requestedBy, priority: 1 }
+        - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: [app, stage, freight, requestedBy]
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: spec is immutable; create a new Promotion instead
+              properties:
+                app: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$', maxLength: 128 }
+                stage: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$', maxLength: 63 }
+                freight:
+                  type: string
+                  maxLength: 512
+                  pattern: '^([^@\s]+@)?sha256:[a-f0-9]{64}$'
+                  description: registry/repo@sha256:… or sha256:… (relative to the app repository). Tags are not allowed.
+                reason: { type: string, maxLength: 1024 }
+                requestedBy:
+                  type: string
+                  maxLength: 256
+                  description: Must equal the creating user (enforced by the ship-promotion admission policy).
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

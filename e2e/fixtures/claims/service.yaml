@@ -1,0 +1,11 @@
+# Crossplane claim, owned by the service team. ship only updates mapped fields.
+apiVersion: platform.example.org/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+spec:
+  replicas: 2
+  artifact:
+    ref: none
+    version: none

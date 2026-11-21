@@ -1,0 +1,33 @@
+# CEL admission policy (Kubernetes >= 1.30, no webhook):
+# - requestedBy must be the user creating the Promotion (trustworthy requester for V8)
+# - a namespace may only promote the apps listed in its ship.dev/apps annotation
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ship-promotion
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [ship.dev]
+        apiVersions: [v1alpha1]
+        operations: [CREATE]
+        resources: [promotions]
+  validations:
+    - expression: object.spec.requestedBy == request.userInfo.username
+      messageExpression: "'spec.requestedBy must be the creating user (' + request.userInfo.username + ')'"
+      reason: Forbidden
+    - expression: >-
+        has(namespaceObject.metadata.annotations) &&
+        'ship.dev/apps' in namespaceObject.metadata.annotations &&
+        object.spec.app in namespaceObject.metadata.annotations['ship.dev/apps'].split(',')
+      messageExpression: "'app ' + object.spec.app + ' may not be promoted from namespace ' + namespaceObject.metadata.name + ' (see its ship.dev/apps annotation)'"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ship-promotion
+spec:
+  policyName: ship-promotion
+  validationActions: [Deny]

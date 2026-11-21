@@ -1,0 +1,33 @@
+# ship-controller's permissions.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: ship-controller, namespace: ship-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: ship-controller }
+rules:
+  - apiGroups: [ship.dev]
+    resources: [promotions]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [ship.dev]
+    resources: [promotions/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: ship-controller }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ship-controller }
+subjects: [{ kind: ServiceAccount, name: ship-controller, namespace: ship-system }]
+---
+# Granted to people/agents per team namespace: propose and read promotions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: ship-promoter }
+rules:
+  - apiGroups: [ship.dev]
+    resources: [promotions]
+    verbs: [get, list, watch, create, delete]

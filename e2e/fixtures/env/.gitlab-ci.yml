@@ -1,0 +1,14 @@
+# Env repo CI. In production ship-verify-env-mr is injected by a pipeline execution
+# policy and the approver credential is not a CI variable (docs/setup.md §4).
+default:
+  image: ship:dev
+
+team-checks:
+  rules: [{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]
+  script:
+    - echo "team compliance checks (lint, policy) would run here"
+
+ship-verify-env-mr:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^ship\//'
+  script: [ship verify-env-mr]

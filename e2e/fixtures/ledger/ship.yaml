@@ -1,0 +1,53 @@
+# Promotion policy for the sandbox. Mirrors the real layout:
+#   services:     sda/services/<SERVICE>/<STAGE>                     claim.yaml
+#   applications: sda/applications/<GROUP>/<STAGE>                   apps/<app>/claim.yaml
+# Layouts are deploy templates, not code: add another template for another layout.
+apiVersion: ship/v1alpha1
+
+registries:
+  "registry:5001": { insecure: true }
+
+gitlab:
+  ledgerProject: platform/ledger
+  botUsername: ship-bot              # opens env MRs
+  promoterUsername: ship-promoter    # opens ledger MRs for Promotion CRs
+  approverUsername: ship-approver    # approves verified env MRs
+  ledgerMinApprovals: 1
+
+# Requester identity (Kubernetes user / agent) -> GitLab user, for V8.
+# Unmapped identities are used as-is (shared IdP usernames).
+identities: {}
+
+deployTemplates:
+  service:
+    driver: crossplane
+    config:
+      envRepo: "sda/services/${app}/${stage}"
+      path: claim.yaml
+      mapping: mappings/service.yaml
+  application:
+    driver: crossplane
+    config:
+      envRepo: "sda/applications/${group}/${stage}"
+      path: "apps/${app}/claim.yaml"
+      mapping: mappings/application.yaml
+
+apps:
+  SV-API_GW_MGT:
+    repository: registry:5001/deploy/sv-api-gw-mgt
+    artifactTypes: [application/vnd.example.deploy-bundle.v1]
+    deploy: { template: service }
+  portal:
+    repository: registry:5001/deploy/portal
+    vars: { group: CUSTOMER_PORTAL }
+    deploy: { template: application }
+
+stages:
+  - name: DEV
+  - name: TEST
+    upstream: DEV
+  - name: PROD
+    upstream: TEST
+    requiredEvidence:
+      - artifactType: application/vnd.ship.evidence.v1+json
+        annotations: { ship.dev/kind: integration-test, ship.dev/stage: TEST, ship.dev/result: pass }

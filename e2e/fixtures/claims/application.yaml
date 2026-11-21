@@ -1,0 +1,7 @@
+apiVersion: platform.example.org/v1alpha1
+kind: ApplicationDeployment
+metadata:
+  name: __NAME__
+spec:
+  bundle: none
+  ingress: { host: __NAME__.example.org }

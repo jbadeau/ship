@@ -1,0 +1,4 @@
+# Policy is owned by the platform team; pins are approved via the approval policy.
+/ship.yaml     @platform-owners
+/mappings/     @platform-owners
+/.gitlab-ci.yml @platform-owners

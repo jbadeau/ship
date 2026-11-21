@@ -1,0 +1,23 @@
+# In production this comes from a pipeline execution policy (override_project_ci),
+# see docs/setup.md. GitLab CE has no policies, so the sandbox commits it here.
+default:
+  image: ship:dev
+variables:
+  GIT_DEPTH: "0"          # V5 needs full pin history
+stages: [test, deploy]
+
+ship-validate:
+  stage: test
+  rules: [{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]
+  script: [ship validate]
+
+ship-plan:
+  stage: test
+  rules: [{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]
+  script: [ship plan]
+
+ship-deploy:
+  stage: deploy
+  rules: [{ if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH' }]
+  resource_group: ship-deploy
+  script: [ship deploy --wait 10m]
