@@ -322,11 +322,19 @@ own. Steps 4–6 depend on the answers below.
   - the Octopus driver reads `octopus-api-key` from `driver.Deps.Secrets`;
   - the controller resolves its git clone credentials on every fetch, and git
     errors are redacted.
-- **Not yet behind adapters:**
-  - `ship promote --push` still uses GitLab push options; step 4 adds an
-    `OpenCR` fallback.
-  - Registry credentials still come from the Docker keychain, which is
-    file-based. A resolver-backed keychain comes with `vault://` (step 5).
+- **Gaps closed after steps 1–3:**
+  - `ship promote --push --open-via auto|push-options|api`. `auto` keeps GitLab
+    push options on GitLab (only the person's git credentials needed) and uses
+    the forge API (`OpenCR`, `forge-token`) on any other forge. With `api`, the
+    repo path comes from `--forge-repo`, the CI context, or the remote URL. If the
+    push succeeds but opening the CR fails, the error says the branch is
+    already pushed.
+  - Registry credentials: a new optional secret `registry-auth` (default
+    `env://SHIP_REGISTRY_AUTH`) holds a Docker config JSON, e.g. a mounted
+    `kubernetes.io/dockerconfigjson` Secret via `file://`. It is consulted
+    first and re-read on every lookup; when it is unset, or has no entry for
+    the registry, ship falls through to Docker's keychain as before. A
+    resolver error fails closed instead of falling through.
 - **Verification:**
   - unit tests;
   - the contract suite against the sandbox GitLab;

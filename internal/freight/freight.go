@@ -66,6 +66,9 @@ type Registry interface {
 // OCI implements Registry with go-containerregistry.
 type OCI struct {
 	insecure map[string]bool
+	// Keychain supplies registry credentials. Nil means Docker's default
+	// keychain (~/.docker/config.json and credential helpers).
+	Keychain authn.Keychain
 }
 
 func NewOCI(insecureRegistries []string) *OCI {
@@ -103,8 +106,12 @@ func (o *OCI) repo(repository string) (name.Repository, error) {
 	return name.NewRepository(repository, o.nameOpts(r.RegistryStr())...)
 }
 
-func remoteOpts(ctx context.Context) []remote.Option {
-	return []remote.Option{remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain)}
+func (o *OCI) remoteOpts(ctx context.Context) []remote.Option {
+	kc := o.Keychain
+	if kc == nil {
+		kc = authn.DefaultKeychain
+	}
+	return []remote.Option{remote.WithContext(ctx), remote.WithAuthFromKeychain(kc)}
 }
 
 // manifestMeta is the minimal, type-agnostic view of a manifest or index.
@@ -120,7 +127,7 @@ func (o *OCI) Resolve(ctx context.Context, ref string) (Descriptor, error) {
 	if err != nil {
 		return Descriptor{}, err
 	}
-	rd, err := remote.Get(d, remoteOpts(ctx)...)
+	rd, err := remote.Get(d, o.remoteOpts(ctx)...)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("resolve %s: %w", ref, err)
 	}
@@ -151,7 +158,7 @@ func (o *OCI) Referrers(ctx context.Context, ref string) ([]Descriptor, error) {
 	if err != nil {
 		return nil, err
 	}
-	idx, err := remote.Referrers(d, remoteOpts(ctx)...)
+	idx, err := remote.Referrers(d, o.remoteOpts(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("referrers of %s: %w", ref, err)
 	}
@@ -179,7 +186,7 @@ func (o *OCI) TagDigest(ctx context.Context, repository, tag string) (string, er
 	if err != nil {
 		return "", err
 	}
-	desc, err := remote.Head(r.Tag(tag), remoteOpts(ctx)...)
+	desc, err := remote.Head(r.Tag(tag), o.remoteOpts(ctx)...)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s:%s: %w", repository, tag, err)
 	}
@@ -191,7 +198,7 @@ func (o *OCI) PushEvidence(ctx context.Context, subject, artifactType string, an
 	if err != nil {
 		return Descriptor{}, err
 	}
-	sd, err := remote.Head(d, remoteOpts(ctx)...)
+	sd, err := remote.Head(d, o.remoteOpts(ctx)...)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("evidence subject %s: %w", subject, err)
 	}
@@ -220,7 +227,7 @@ func (o *OCI) PushEvidence(ctx context.Context, subject, artifactType string, an
 		return Descriptor{}, err
 	}
 	target := d.Context().Digest(h.String())
-	if err := remote.Write(target, img, remoteOpts(ctx)...); err != nil {
+	if err := remote.Write(target, img, o.remoteOpts(ctx)...); err != nil {
 		return Descriptor{}, fmt.Errorf("push evidence for %s: %w", subject, err)
 	}
 	return Descriptor{

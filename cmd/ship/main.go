@@ -23,6 +23,7 @@ import (
 	"juliusbaer.com/codeak/ship/internal/envmr"
 	"juliusbaer.com/codeak/ship/internal/forge"
 	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitlab"
 	"juliusbaer.com/codeak/ship/internal/gitx"
 	"juliusbaer.com/codeak/ship/internal/ledger"
 	"juliusbaer.com/codeak/ship/internal/policy"
@@ -127,7 +128,71 @@ func registry(cfg *config.File) *freight.OCI {
 		insecure = cfg.InsecureRegistries()
 	}
 	insecure = append(insecure, strings.Split(os.Getenv("SHIP_INSECURE_REGISTRIES"), ",")...)
-	return freight.NewOCI(insecure)
+	reg := freight.NewOCI(insecure)
+	sec, err := secrets()
+	src := func(context.Context) (secret.Value, error) { return secret.Value{}, err }
+	if err == nil {
+		src = sec.Source(secret.RegistryAuth)
+	} // else: a bad SHIP_SECRET_* override fails registry access closed
+	reg.Keychain = freight.Keychain(src)
+	return reg
+}
+
+// crOpener picks how `promote --push` opens the change request. nil means GitLab
+// push options, which need only the developer's own git credentials.
+func crOpener(ctx context.Context, via, repoPath string, remoteURL func() (string, error)) (func(context.Context, forge.CRSpec) (forge.ChangeRequest, error), error) {
+	r, err := rt()
+	if err != nil {
+		return nil, err
+	}
+	switch via {
+	case "push-options":
+		return nil, nil
+	case "auto":
+		if r.forgeErr != nil || r.Type == gitlab.Name {
+			return nil, nil
+		}
+	case "api":
+	default:
+		return nil, fmt.Errorf("--open-via must be auto, push-options or api, not %q", via)
+	}
+	fg, err := forgeClient(ctx, secret.ForgeToken)
+	if err != nil {
+		return nil, fmt.Errorf("--open-via api: %w", err)
+	}
+	if repoPath == "" {
+		repoPath = ci().Repo
+	}
+	if repoPath == "" {
+		u, err := remoteURL()
+		if err != nil {
+			return nil, err
+		}
+		if repoPath = repoFromRemote(u); repoPath == "" {
+			return nil, fmt.Errorf("cannot derive the repo path from remote %q; pass --forge-repo", u)
+		}
+	}
+	return func(ctx context.Context, s forge.CRSpec) (forge.ChangeRequest, error) {
+		return fg.OpenCR(ctx, repoPath, s)
+	}, nil
+}
+
+// repoFromRemote extracts "group/project" from https://host/group/project.git,
+// ssh://git@host:2222/group/project.git or git@host:group/project.git.
+func repoFromRemote(u string) string {
+	u = strings.TrimSuffix(strings.TrimSpace(u), "/")
+	u = strings.TrimSuffix(u, ".git")
+	if i := strings.Index(u, "://"); i >= 0 {
+		rest := u[i+3:]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			return rest[j+1:]
+		}
+		return ""
+	}
+	if host, p, ok := strings.Cut(u, ":"); ok && strings.Contains(host, "@") {
+		return p // scp-like syntax
+	}
+	return ""
 }
 
 func zeroSHA(s string) bool { return strings.Trim(s, "0") == "" }
@@ -151,7 +216,9 @@ func cmdPromote(ctx context.Context, args []string) error {
 	fs.StringVar(&o.Freight, "freight", "", "registry/repo@sha256:… or sha256:… (required)")
 	fs.StringVar(&o.Reason, "reason", "", "why (goes into the commit and MR)")
 	fs.StringVar(&o.RequestedBy, "requested-by", os.Getenv("SHIP_REQUESTED_BY"), "person or agent identity")
-	fs.BoolVar(&o.Push, "push", false, "push and create the MR via GitLab push options")
+	fs.BoolVar(&o.Push, "push", false, "push and open the change request")
+	via := fs.String("open-via", "auto", "how --push opens the change request: push-options (GitLab), api (forge API, forge-token), auto (push-options on GitLab, else api)")
+	repoPath := fs.String("forge-repo", "", "ledger repo path on the forge, for --open-via api (default: from CI, else the remote URL)")
 	fs.StringVar(&o.Remote, "remote", "origin", "git remote")
 	fs.StringVar(&o.Target, "target", "main", "MR target branch")
 	if err := parse(fs, args); err != nil {
@@ -165,12 +232,19 @@ func cmdPromote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if o.Push {
+		if o.OpenCR, err = crOpener(ctx, *via, *repoPath, func() (string, error) { return repo.Run("remote", "get-url", o.Remote) }); err != nil {
+			return err
+		}
+	}
 	res, err := promote.Run(ctx, policy.Checker{Cfg: cfg, Repo: repo, Reg: registry(cfg)}, o)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("branch %s: %s/%s -> %s\n", res.Branch, o.App, o.Stage, res.Freight.Ref)
-	if res.Pushed {
+	if res.CR != nil {
+		fmt.Printf("pushed; opened %s\n", res.CR.URL)
+	} else if res.Pushed {
 		fmt.Println("pushed; GitLab created the merge request")
 	} else {
 		fmt.Printf("not pushed; run: git push %s %s (or rerun with --push)\n", o.Remote, res.Branch)

@@ -176,8 +176,10 @@ ship promote --app payments --stage prod --freight sha256:4f1c… \
 2. Run the same checks as `validate` locally, against `HEAD`, to fail fast. This is advisory.
 3. Create branch `promote/payments/prod/4f1c…`, write the pin, and commit with trailers
    (`Freight:`, `Reason:`, `Requested-by:`). `Requested-by:` records the agent identity when an agent proposes.
-4. With `--push`, push using GitLab push options (`merge_request.create`, `.target`,
-   `.title`, `.description`), so no API token is needed beyond git push.
+4. With `--push`, push and open the MR. On GitLab the default is push options
+   (`merge_request.create`, `.target`, `.title`, `.description`), so no API token is
+   needed beyond git push. `--open-via api` (the default on other forges) does a plain
+   push and opens the change request through the forge API with `forge-token`.
 
 Agents can call the CLI. An MCP wrapper (`ship mcp`) that exposes `status`,
 `evidence`, `promote` (read state and propose only) comes later. Agents never get

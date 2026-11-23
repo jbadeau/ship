@@ -63,7 +63,7 @@ the audit trail. ship holds no state of its own.
 ## Commands
 
 ```
-ship promote   --app A --stage S --freight sha256:… --push   # person/agent proposes (ledger MR)
+ship promote   --app A --stage S --freight sha256:… --push   # person/agent proposes (ledger MR; --open-via api for non-GitLab)
 ship validate                                                  # MR pipeline, fail-closed (V1–V7)
 ship plan                                                      # MR pipeline, driver dry-run
 ship deploy                                                    # main pipeline: V8, then hand pins to drivers
@@ -99,11 +99,12 @@ ship has always used. Override any of them with `SHIP_SECRET_<NAME>=<ref>`:
 
 | Secret | Default | Used by |
 |---|---|---|
-| `forge-token` | `env://SHIP_GITLAB_TOKEN` | deploy, controller (ship-bot / ship-promoter) |
+| `forge-token` | `env://SHIP_GITLAB_TOKEN` | deploy, controller (ship-bot / ship-promoter), `promote --open-via api` |
 | `forge-approver-token` | `env://SHIP_APPROVER_TOKEN` | approver service |
 | `forge-read-token` | `env://SHIP_READ_TOKEN` | `verify-env-mr --no-approve` |
 | `webhook-secret` | `env://SHIP_WEBHOOK_SECRET` | approver service |
 | `octopus-api-key` | `env://OCTOPUS_API_KEY` | octopus driver |
+| `registry-auth` | `env://SHIP_REGISTRY_AUTH` | registry access (Docker config JSON; optional, else Docker's keychain) |
 
 For example, `SHIP_SECRET_WEBHOOK_SECRET=file:///var/run/secrets/ship/webhook`
 reads the secret from a mounted Kubernetes Secret. File secrets are re-read on

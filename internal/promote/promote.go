@@ -1,5 +1,6 @@
 // Package promote constructs a promotion: a branch + commit changing one pin,
-// optionally pushed with GitLab push options so the MR is created on push.
+// optionally pushed with the change request opened either by GitLab push
+// options or through the forge API (any forge adapter).
 package promote
 
 import (
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"juliusbaer.com/codeak/ship/internal/forge"
 	"juliusbaer.com/codeak/ship/internal/freight"
 	"juliusbaer.com/codeak/ship/internal/ledger"
 	"juliusbaer.com/codeak/ship/internal/policy"
@@ -22,13 +24,17 @@ type Options struct {
 	Push        bool
 	Remote      string // default "origin"
 	Target      string // MR target branch, default "main"
+	// OpenCR, when set, opens the change request through the forge API after a
+	// plain push. When nil, --push uses GitLab push options.
+	OpenCR func(context.Context, forge.CRSpec) (forge.ChangeRequest, error)
 }
 
 type Result struct {
 	Branch     string
 	Freight    freight.Descriptor
 	Pushed     bool
-	Violations []string // advisory pre-check; validate in CI is authoritative
+	CR         *forge.ChangeRequest // set when opened through the forge API
+	Violations []string             // advisory pre-check; validate in CI is authoritative
 }
 
 // Run creates the promotion branch and commit. It refuses to proceed if the
@@ -97,17 +103,28 @@ func Run(ctx context.Context, c policy.Checker, o Options) (Result, error) {
 	res := Result{Branch: branch, Freight: *desc}
 	if o.Push {
 		desc := strings.ReplaceAll(fmt.Sprintf("Freight: %s · Reason: %s · Requested-by: %s", res.Freight.Ref, o.Reason, o.RequestedBy), "\n", " ")
-		if _, err := c.Repo.Run("push",
-			"-o", "merge_request.create",
-			"-o", "merge_request.target="+o.Target,
-			"-o", "merge_request.remove_source_branch",
-			"-o", "merge_request.title="+title,
-			"-o", "merge_request.description="+desc,
-			"-o", "merge_request.label=promotion",
-			o.Remote, branch); err != nil {
+		args := []string{"push"}
+		if o.OpenCR == nil {
+			args = append(args,
+				"-o", "merge_request.create",
+				"-o", "merge_request.target="+o.Target,
+				"-o", "merge_request.remove_source_branch",
+				"-o", "merge_request.title="+title,
+				"-o", "merge_request.description="+desc,
+				"-o", "merge_request.label=promotion")
+		}
+		if _, err := c.Repo.Run(append(args, o.Remote, branch)...); err != nil {
 			return res, err
 		}
 		res.Pushed = true
+		if o.OpenCR != nil {
+			cr, err := o.OpenCR(ctx, forge.CRSpec{SourceBranch: branch, TargetBranch: o.Target, Title: title,
+				Description: desc, Labels: []string{"promotion"}, RemoveSourceBranch: true})
+			if err != nil {
+				return res, fmt.Errorf("pushed %s, but opening the change request failed: %w", branch, err)
+			}
+			res.CR = &cr
+		}
 	}
 	return res, nil
 }

@@ -35,6 +35,7 @@ const (
 	ForgeReadToken     = "forge-read-token"     // read-only API token (env-repo CI)
 	WebhookSecret      = "webhook-secret"       // forge webhook shared secret
 	OctopusAPIKey      = "octopus-api-key"
+	RegistryAuth       = "registry-auth" // Docker config JSON; optional, falls back to Docker's keychain
 )
 
 // Names maps each known secret to its default reference.
@@ -44,6 +45,7 @@ var Names = map[string]string{
 	ForgeReadToken:     "env://SHIP_READ_TOKEN",
 	WebhookSecret:      "env://SHIP_WEBHOOK_SECRET",
 	OctopusAPIKey:      "env://OCTOPUS_API_KEY",
+	RegistryAuth:       "env://SHIP_REGISTRY_AUTH",
 }
 
 // OverrideVar is the environment variable that overrides name's reference.

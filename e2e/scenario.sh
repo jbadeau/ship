@@ -61,9 +61,11 @@ cd "$WORK/ledger"
 sync() { git checkout -q main && git pull -q --ff-only; }
 
 # promote via the CLI; expects acceptance by CI, approval and deploy.
+# PROMOTE_VIA=api opens the MR through the forge API (as the promoter) instead of push options.
 promote_ok() { # app stage freight
   sync
-  SHIP_REQUESTED_BY="agent:e2e" ship promote --app "$1" --stage "$2" --freight "$3" --reason "e2e $1 to $2" --push >/dev/null
+  SHIP_REQUESTED_BY="agent:e2e" SHIP_FORGE_URL=http://gitlab:8929 SHIP_GITLAB_TOKEN="$PROMOTER_TOKEN" \
+    ship promote --app "$1" --stage "$2" --freight "$3" --reason "e2e $1 to $2" --push --open-via "${PROMOTE_VIA:-auto}" >/dev/null
   local short=${3##*sha256:}; short=${short:0:12}
   local br="promote/$1/$2/$short" iid
   iid=$(mr_by_branch "$LEDGER" "$br"); [[ -n $iid ]] || die "no MR for $br"
@@ -123,7 +125,7 @@ ok "ship promote refuses locally (V5)"
 propose_raw_expect_fail skip-test "V5" "ledger/$GW/PROD.yaml=freight: $A"$'\n'
 
 log "4. promote A → TEST"
-promote_ok "$GW" TEST "$A"
+PROMOTE_VIA=api promote_ok "$GW" TEST "$A"
 
 log "5. PROD without evidence is rejected"
 propose_raw_expect_fail no-evidence "V6" "ledger/$GW/PROD.yaml=freight: $A"$'\n'
