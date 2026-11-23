@@ -41,4 +41,4 @@ it holds no state of its own.
 
 Details: [design](docs/design.md) · [setup](docs/setup.md) ·
 [adapters](docs/adapters.md) · [approver service](docs/approver-service.md) ·
-[comparison](docs/comparison.md). Development tasks: `mise tasks`.
+[comparison](docs/comparison.md) · [reference](docs/reference.md). Development tasks: `mise tasks`.
