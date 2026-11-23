@@ -1,6 +1,8 @@
 # ship: promotion as merge requests
 
 Status: **MVP implemented** (CLI, crossplane + octopus + noop/exec drivers, e2e sandbox). See README.md. §12 (Promotion CRD + V8) is **implemented**.
+Comparison with Kargo, GitOps Promoter, Telefonistka, Cloud Deploy and Octopus, with proposed adoptions: [comparison.md](comparison.md).
+Kosli as evidence and runtime backend: [kosli.md](kosli.md).
 
 ## 1. Summary
 
@@ -491,7 +493,8 @@ instance needs Ultimate, with the framework label on the ledger repo.
 11. **ship-approver credential.** `verify-env-mr` runs in env-repo MR pipelines alongside team jobs,
     so the approver token must not be a plain CI variable there. Recommended: a small approver service
     on env-repo MR webhooks (reusing the same verification code), or Vault + GitLab ID tokens.
-    See [setup.md §4](setup.md#4--protecting-the-ship-approver-credential).
+    See [setup.md §4](setup.md#4--protecting-the-ship-approver-credential). **Implemented** as the
+    approver service: [approver-service.md](approver-service.md).
 
 ## 12. Promotion CRD (implemented)
 

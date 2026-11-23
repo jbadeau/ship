@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/driver"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitx"
-	"github.com/jbadeau/ship/internal/ledger"
-	"github.com/jbadeau/ship/internal/policy"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/driver"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/policy"
 )
 
 type Runner struct {

@@ -18,7 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
-	"github.com/jbadeau/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/gitx"
 )
 
 // Registry starts an in-memory OCI registry and returns its host:port.

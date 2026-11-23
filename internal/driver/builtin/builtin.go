@@ -4,9 +4,10 @@ package builtin
 import (
 	"os"
 
-	"github.com/jbadeau/ship/internal/driver"
-	"github.com/jbadeau/ship/internal/driver/crossplane"
-	"github.com/jbadeau/ship/internal/driver/octopus"
+	"juliusbaer.com/codeak/ship/internal/driver"
+	"juliusbaer.com/codeak/ship/internal/driver/crossplane"
+	"juliusbaer.com/codeak/ship/internal/driver/octopus"
+	"juliusbaer.com/codeak/ship/internal/secret"
 )
 
 // Get returns a built-in driver, or ship-driver-<name> from PATH.
@@ -19,7 +20,11 @@ func Get(name string, deps driver.Deps) (driver.Driver, error) {
 	case "crossplane":
 		return crossplane.Driver{Deps: deps}, nil
 	case "octopus":
-		return octopus.Driver{Deps: deps, URL: os.Getenv("OCTOPUS_URL"), APIKey: os.Getenv("OCTOPUS_API_KEY")}, nil
+		d := octopus.Driver{Deps: deps, URL: os.Getenv("OCTOPUS_URL")}
+		if deps.Secrets != nil {
+			d.APIKey = deps.Secrets.Source(secret.OctopusAPIKey)
+		}
+		return d, nil
 	}
 	return driver.LookupExternal(name, deps)
 }

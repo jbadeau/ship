@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/policy"
-	"github.com/jbadeau/ship/internal/testutil"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/policy"
+	"juliusbaer.com/codeak/ship/internal/testutil"
 )
 
 const bundleType = "application/vnd.example.deploy-bundle.v1"

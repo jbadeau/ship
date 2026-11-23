@@ -4,10 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,18 +15,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/jbadeau/ship/api/v1alpha1"
-	"github.com/jbadeau/ship/internal/controller"
+	"juliusbaer.com/codeak/ship/api/v1alpha1"
+	"juliusbaer.com/codeak/ship/internal/controller"
+	"juliusbaer.com/codeak/ship/internal/secret"
 )
 
 // cmdController runs ship-controller: Promotion CRs -> ledger MRs, status mirrored
 // back, and (with --status-check-id) the pre-merge V8 external status check.
 func cmdController(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("controller", flag.ContinueOnError)
-	ledgerProject := fs.String("ledger-project", os.Getenv("SHIP_LEDGER_PROJECT"), "ledger GitLab project path")
-	checkDefault, _ := strconv.Atoi(os.Getenv("SHIP_STATUS_CHECK_ID"))
-	checkID := fs.Int("status-check-id", checkDefault, "GitLab external status check id for V8 (0 = disabled; needs Ultimate)")
-	poll := fs.Duration("poll", 10*time.Second, "GitLab polling interval for active Promotions")
+	ledgerProject := fs.String("ledger-project", os.Getenv("SHIP_LEDGER_PROJECT"), "ledger repo path")
+	checkKey := fs.String("status-check-id", os.Getenv("SHIP_STATUS_CHECK_ID"), "pre-merge V8 check: GitLab external status check id (empty or 0 = disabled; needs Ultimate)")
+	poll := fs.Duration("poll", 10*time.Second, "forge polling interval for active Promotions")
 	cacheDir := fs.String("cache-dir", filepath.Join(os.TempDir(), "ship-ledger.git"), "bare clone of the ledger repo")
 	metrics := fs.String("metrics-bind-address", "0", "metrics address (0 = disabled)")
 	if err := parse(fs, args); err != nil {
@@ -36,22 +35,17 @@ func cmdController(ctx context.Context, args []string) error {
 	if *ledgerProject == "" {
 		return fmt.Errorf("--ledger-project (SHIP_LEDGER_PROJECT) is required")
 	}
-	gl := gitlabClient("SHIP_GITLAB_TOKEN")
-	if gl == nil {
-		return fmt.Errorf("SHIP_GITLAB_URL and SHIP_GITLAB_TOKEN (ship-promoter) are required")
+	gl, err := forgeClient(ctx, secret.ForgeToken) // ship-promoter
+	if err != nil {
+		return err
 	}
 	ctrl.SetLogger(zap.New())
 
-	proj, err := gl.Project(ctx, *ledgerProject)
+	proj, err := gl.Repo(ctx, *ledgerProject)
 	if err != nil {
 		return err
 	}
-	cloneURL, err := url.Parse(proj.HTTPURLToRepo)
-	if err != nil {
-		return err
-	}
-	cloneURL.User = url.UserPassword("oauth2", gl.Token)
-	cache := &controller.LedgerCache{Dir: *cacheDir, URL: cloneURL.String(), Branch: proj.DefaultBranch, MinInterval: 3 * time.Second}
+	cache := &controller.LedgerCache{Dir: *cacheDir, URL: proj.CloneURL, Auth: gl.GitCredentials, Branch: proj.DefaultBranch, MinInterval: 3 * time.Second}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -67,18 +61,18 @@ func cmdController(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	rec := &controller.Reconciler{Client: mgr.GetClient(), GitLab: gl, Reg: registry(nil),
+	rec := &controller.Reconciler{Client: mgr.GetClient(), Forge: gl, Reg: registry(nil),
 		LedgerProject: *ledgerProject, Ledger: cache, Poll: *poll}
 	if err := rec.SetupWithManager(mgr); err != nil {
 		return err
 	}
-	if *checkID > 0 {
-		if err := mgr.Add(&controller.StatusChecker{Reader: mgr.GetClient(), GitLab: gl, LedgerProject: *ledgerProject,
-			Ledger: cache, CheckID: *checkID, Interval: *poll}); err != nil {
+	if k := strings.TrimSpace(*checkKey); k != "" && k != "0" {
+		if err := mgr.Add(&controller.StatusChecker{Reader: mgr.GetClient(), Forge: gl, LedgerProject: *ledgerProject,
+			Ledger: cache, CheckKey: k, Interval: *poll}); err != nil {
 			return err
 		}
 	} else {
-		fmt.Fprintln(os.Stderr, "V8 pre-merge status check disabled (--status-check-id=0); V8 is still enforced at deploy")
+		fmt.Fprintln(os.Stderr, "V8 pre-merge status check disabled (no --status-check-id); V8 is still enforced at deploy")
 	}
 	return mgr.Start(ctx)
 }

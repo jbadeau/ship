@@ -1,11 +1,10 @@
 // Package controller implements ship-controller: Promotion CRs become ledger MRs,
-// and GitLab state is mirrored back into .status (docs/design.md §12).
+// and forge state is mirrored back into .status (docs/design.md §12).
 package controller
 
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -17,20 +16,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/jbadeau/ship/api/v1alpha1"
-	"github.com/jbadeau/ship/internal/approval"
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/driver/crossplane"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/gitx"
-	"github.com/jbadeau/ship/internal/ledger"
-	"github.com/jbadeau/ship/internal/policy"
+	"juliusbaer.com/codeak/ship/api/v1alpha1"
+	"juliusbaer.com/codeak/ship/internal/approval"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/driver/crossplane"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/policy"
 )
 
 type Reconciler struct {
 	client.Client
-	GitLab        *gitlab.Client // as ship-promoter
+	Forge         forge.Forge // as ship-promoter
 	Reg           freight.Registry
 	LedgerProject string
 	Ledger        *LedgerCache
@@ -153,18 +152,18 @@ func (r *Reconciler) propose(ctx context.Context, p *v1alpha1.Promotion, cfg *co
 		if mr, err = r.openMR(ctx, p, cfg, repo, branch, *desc); err != nil {
 			return err
 		}
-		log.FromContext(ctx).Info("opened ledger MR", "mr", mr.WebURL)
+		log.FromContext(ctx).Info("opened ledger MR", "mr", mr.URL)
 	}
-	p.Status.LedgerMR = &v1alpha1.MRRef{IID: mr.IID, URL: mr.WebURL, State: mr.State}
+	p.Status.LedgerMR = &v1alpha1.MRRef{IID: mr.ID, URL: mr.URL, State: mr.State}
 	p.Status.Phase = v1alpha1.PhaseProposed
 	p.Status.Message = "ledger MR opened"
-	setCond(p, v1alpha1.CondProposed, true, "MROpened", mr.WebURL)
+	setCond(p, v1alpha1.CondProposed, true, "MROpened", mr.URL)
 	setUnknown(p, v1alpha1.CondValidated, "Pending", "waiting for ledger pipeline")
 	return r.supersede(ctx, p)
 }
 
-func (r *Reconciler) findMR(ctx context.Context, branch string) (*gitlab.MR, error) {
-	mrs, err := r.GitLab.ListMRs(ctx, r.LedgerProject, url.Values{"source_branch": {branch}, "state": {"all"}, "order_by": {"created_at"}, "sort": {"desc"}})
+func (r *Reconciler) findMR(ctx context.Context, branch string) (*forge.ChangeRequest, error) {
+	mrs, err := r.Forge.ListCRs(ctx, r.LedgerProject, forge.CRQuery{State: forge.StateAll, SourceBranch: branch})
 	if err != nil || len(mrs) == 0 {
 		return nil, err
 	}
@@ -176,18 +175,18 @@ func trailers(p *v1alpha1.Promotion, desc freight.Descriptor) string {
 		desc.Ref, p.Spec.RequestedBy, p.Namespace, p.Name, p.UID)
 }
 
-func (r *Reconciler) openMR(ctx context.Context, p *v1alpha1.Promotion, cfg *config.File, repo gitx.Repo, branch string, desc freight.Descriptor) (*gitlab.MR, error) {
-	if _, exists, err := r.GitLab.BranchSHA(ctx, r.LedgerProject, branch); err != nil {
+func (r *Reconciler) openMR(ctx context.Context, p *v1alpha1.Promotion, cfg *config.File, repo gitx.Repo, branch string, desc freight.Descriptor) (*forge.ChangeRequest, error) {
+	if _, exists, err := r.Forge.BranchSHA(ctx, r.LedgerProject, branch); err != nil {
 		return nil, err
 	} else if exists { // leftover from a failed earlier attempt: ours to recreate
-		if err := r.GitLab.DeleteBranch(ctx, r.LedgerProject, branch); err != nil {
+		if err := r.Forge.DeleteBranch(ctx, r.LedgerProject, branch); err != nil {
 			return nil, err
 		}
 	}
 	path := ledger.Path(cfg.LedgerDir, p.Spec.App, p.Spec.Stage)
-	action := "create"
+	create := true
 	if cur, _ := ledger.At(repo, r.Ledger.Branch, cfg.LedgerDir, p.Spec.App, p.Spec.Stage); cur != nil {
-		action = "update"
+		create = false
 	}
 	title := fmt.Sprintf("Promote %s to %s (%s)", p.Spec.App, p.Spec.Stage, desc.Short())
 	body := title + "\n\n"
@@ -195,8 +194,8 @@ func (r *Reconciler) openMR(ctx context.Context, p *v1alpha1.Promotion, cfg *con
 		body += p.Spec.Reason + "\n\n"
 	}
 	body += trailers(p, desc)
-	if err := r.GitLab.CreateCommit(ctx, r.LedgerProject, branch, r.Ledger.Branch, body,
-		[]gitlab.CommitAction{{Action: action, FilePath: path, Content: string(ledger.Marshal(ledger.Pin{Freight: desc.Ref}))}}); err != nil {
+	if err := r.Forge.Commit(ctx, r.LedgerProject, forge.CommitSpec{Branch: branch, StartBranch: r.Ledger.Branch, Message: body,
+		Files: []forge.FileChange{{Path: path, Create: create, Content: string(ledger.Marshal(ledger.Pin{Freight: desc.Ref}))}}}); err != nil {
 		return nil, err
 	}
 	descr := fmt.Sprintf("Promotion requested via Kubernetes `Promotion` **%s/%s** by **%s**.\n\n", p.Namespace, p.Name, p.Spec.RequestedBy)
@@ -204,9 +203,9 @@ func (r *Reconciler) openMR(ctx context.Context, p *v1alpha1.Promotion, cfg *con
 		descr += "> " + p.Spec.Reason + "\n\n"
 	}
 	descr += "The requester's approval does not count (V8).\n\n```\n" + trailers(p, desc) + "```\n"
-	mr, err := r.GitLab.CreateMR(ctx, r.LedgerProject, map[string]any{
-		"source_branch": branch, "target_branch": r.Ledger.Branch, "title": title,
-		"description": descr, "labels": "promotion", "remove_source_branch": true,
+	mr, err := r.Forge.OpenCR(ctx, r.LedgerProject, forge.CRSpec{
+		SourceBranch: branch, TargetBranch: r.Ledger.Branch, Title: title,
+		Description: descr, Labels: []string{"promotion"}, RemoveSourceBranch: true,
 	})
 	return &mr, err
 }
@@ -223,19 +222,19 @@ func (r *Reconciler) supersede(ctx context.Context, p *v1alpha1.Promotion) error
 			o.Status.Phase.Terminal() || o.Status.LedgerMR == nil || !o.CreationTimestamp.Before(&p.CreationTimestamp) {
 			continue
 		}
-		mr, err := r.GitLab.MR(ctx, r.LedgerProject, o.Status.LedgerMR.IID)
+		mr, err := r.Forge.CR(ctx, r.LedgerProject, o.Status.LedgerMR.IID)
 		if err != nil {
 			return err
 		}
-		if mr.State != "opened" {
+		if mr.State != forge.StateOpen {
 			continue // merged ones proceed; closed ones are observed as such
 		}
-		if err := r.GitLab.CloseMR(ctx, r.LedgerProject, mr.IID, fmt.Sprintf("Superseded by Promotion %s/%s (%s).", p.Namespace, p.Name, p.Status.LedgerMR.URL)); err != nil {
+		if err := r.Forge.CloseCR(ctx, r.LedgerProject, mr.ID, fmt.Sprintf("Superseded by Promotion %s/%s (%s).", p.Namespace, p.Name, p.Status.LedgerMR.URL)); err != nil {
 			return err
 		}
 		o.Status.Phase = v1alpha1.PhaseSuperseded
 		o.Status.Message = fmt.Sprintf("superseded by %s/%s", p.Namespace, p.Name)
-		o.Status.LedgerMR.State = "closed"
+		o.Status.LedgerMR.State = forge.StateClosed
 		if err := r.Status().Update(ctx, o); err != nil {
 			return err
 		}
@@ -243,14 +242,14 @@ func (r *Reconciler) supersede(ctx context.Context, p *v1alpha1.Promotion) error
 	return nil
 }
 
-// observe mirrors GitLab state into the Promotion status.
+// observe mirrors forge state into the Promotion status.
 func (r *Reconciler) observe(ctx context.Context, p *v1alpha1.Promotion, cfg *config.File) error {
-	mr, err := r.GitLab.MR(ctx, r.LedgerProject, p.Status.LedgerMR.IID)
+	mr, err := r.Forge.CR(ctx, r.LedgerProject, p.Status.LedgerMR.IID)
 	if err != nil {
 		return err
 	}
 	p.Status.LedgerMR.State = mr.State
-	facts, err := approval.Gather(ctx, r.GitLab, r.LedgerProject, mr, p.Spec.RequestedBy)
+	facts, err := approval.Gather(ctx, r.Forge, r.LedgerProject, mr, p.Spec.RequestedBy)
 	if err != nil {
 		return err
 	}
@@ -262,38 +261,35 @@ func (r *Reconciler) observe(ctx context.Context, p *v1alpha1.Promotion, cfg *co
 	}
 
 	switch mr.State {
-	case "opened":
+	case forge.StateOpen:
 		st := ""
-		if mr.HeadPipeline != nil {
-			st = mr.HeadPipeline.Status
+		if mr.Pipeline != nil {
+			st = mr.Pipeline.Status
 		}
 		switch st {
-		case "success":
-			setCond(p, v1alpha1.CondValidated, true, "PipelinePassed", mr.HeadPipeline.WebURL)
+		case forge.RunSuccess:
+			setCond(p, v1alpha1.CondValidated, true, "PipelinePassed", mr.Pipeline.URL)
 			p.Status.Phase = v1alpha1.PhaseAwaitingApproval
 			p.Status.Message = "validated; waiting for independent approval and merge"
-		case "failed", "canceled", "skipped":
-			reject(p, "ledger validation failed", []string{"see " + mr.HeadPipeline.WebURL})
-			return r.GitLab.CloseMR(ctx, r.LedgerProject, mr.IID, "Closed by ship-controller: validation failed, Promotion rejected.")
+		case forge.RunFailed, forge.RunCanceled, forge.RunSkipped:
+			reject(p, "ledger validation failed", []string{"see " + mr.Pipeline.URL})
+			return r.Forge.CloseCR(ctx, r.LedgerProject, mr.ID, "Closed by ship-controller: validation failed, Promotion rejected.")
 		default:
 			p.Status.Phase = v1alpha1.PhaseProposed
 			p.Status.Message = "ledger pipeline " + orDash(st)
 		}
-	case "closed":
+	case forge.StateClosed:
 		if p.Status.Phase != v1alpha1.PhaseSuperseded {
 			p.Status.Phase = v1alpha1.PhaseAbandoned
 			p.Status.Message = "ledger MR was closed"
 		}
-	case "merged":
-		setCond(p, v1alpha1.CondMerged, true, "Merged", mr.WebURL)
-		for _, sha := range []string{mr.MergeCommitSHA, mr.SquashCommitSHA, mr.SHA} {
-			if sha != "" {
-				p.Status.LedgerCommit = sha
-				break
-			}
+	case forge.StateMerged:
+		setCond(p, v1alpha1.CondMerged, true, "Merged", mr.URL)
+		if len(mr.MergeSHAs) > 0 {
+			p.Status.LedgerCommit = mr.MergeSHAs[0]
 		}
 		r.observeTargets(ctx, p, cfg)
-		pipes, err := r.GitLab.Pipelines(ctx, r.LedgerProject, p.Status.LedgerCommit)
+		pipes, err := r.Forge.Runs(ctx, r.LedgerProject, p.Status.LedgerCommit)
 		if err != nil {
 			return err
 		}
@@ -302,17 +298,17 @@ func (r *Reconciler) observe(ctx context.Context, p *v1alpha1.Promotion, cfg *co
 			return nil
 		}
 		pl := pipes[0]
-		p.Status.DeployPipeline = &v1alpha1.PipelineRef{ID: pl.ID, URL: pl.WebURL, Status: pl.Status}
+		p.Status.DeployPipeline = &v1alpha1.PipelineRef{ID: pl.ID, URL: pl.URL, Status: pl.Status}
 		switch pl.Status {
-		case "success":
+		case forge.RunSuccess:
 			p.Status.Phase, p.Status.Message = v1alpha1.PhaseSucceeded, "deployed"
-			setCond(p, v1alpha1.CondDeployed, true, "Deployed", pl.WebURL)
-		case "failed", "canceled":
-			p.Status.Phase, p.Status.Message = v1alpha1.PhaseFailed, "deploy pipeline "+pl.Status+": "+pl.WebURL
-			setCond(p, v1alpha1.CondDeployed, false, "PipelineFailed", pl.WebURL)
+			setCond(p, v1alpha1.CondDeployed, true, "Deployed", pl.URL)
+		case forge.RunFailed, forge.RunCanceled:
+			p.Status.Phase, p.Status.Message = v1alpha1.PhaseFailed, "deploy pipeline "+pl.Status+": "+pl.URL
+			setCond(p, v1alpha1.CondDeployed, false, "PipelineFailed", pl.URL)
 		default:
 			p.Status.Phase, p.Status.Message = v1alpha1.PhaseDeploying, "deploy pipeline "+pl.Status
-			setUnknown(p, v1alpha1.CondDeployed, "Deploying", pl.WebURL)
+			setUnknown(p, v1alpha1.CondDeployed, "Deploying", pl.URL)
 		}
 	}
 	return nil
@@ -329,12 +325,12 @@ func (r *Reconciler) observeTargets(ctx context.Context, p *v1alpha1.Promotion, 
 		return
 	}
 	digest := p.Status.Freight[strings.LastIndex(p.Status.Freight, "@")+1:]
-	mrs, err := r.GitLab.ListMRs(ctx, t.EnvRepo, url.Values{"source_branch": {crossplane.Branch(p.Spec.App, p.Spec.Stage, digest)}, "state": {"all"}})
+	mrs, err := r.Forge.ListCRs(ctx, t.EnvRepo, forge.CRQuery{State: forge.StateAll, SourceBranch: crossplane.Branch(p.Spec.App, p.Spec.Stage, digest)})
 	if err != nil || len(mrs) == 0 {
 		return
 	}
-	by, _ := r.GitLab.ApprovedBy(ctx, t.EnvRepo, mrs[0].IID)
-	p.Status.Targets = []v1alpha1.Target{{Kind: "envMR", URL: mrs[0].WebURL, State: mrs[0].State, ApprovedBy: by}}
+	by, _ := r.Forge.Approvers(ctx, t.EnvRepo, mrs[0].ID)
+	p.Status.Targets = []v1alpha1.Target{{Kind: "envMR", URL: mrs[0].URL, State: mrs[0].State, ApprovedBy: by}}
 }
 
 func (r *Reconciler) finalize(ctx context.Context, p *v1alpha1.Promotion) error {
@@ -342,12 +338,12 @@ func (r *Reconciler) finalize(ctx context.Context, p *v1alpha1.Promotion) error 
 		return nil
 	}
 	if p.Status.LedgerMR != nil {
-		mr, err := r.GitLab.MR(ctx, r.LedgerProject, p.Status.LedgerMR.IID)
-		if err != nil && !gitlab.IsStatus(err, 404) {
+		mr, err := r.Forge.CR(ctx, r.LedgerProject, p.Status.LedgerMR.IID)
+		if err != nil && !forge.IsNotFound(err) {
 			return err
 		}
-		if err == nil && mr.State == "opened" {
-			if err := r.GitLab.CloseMR(ctx, r.LedgerProject, mr.IID, fmt.Sprintf("Closed by ship-controller: Promotion %s/%s was deleted.", p.Namespace, p.Name)); err != nil {
+		if err == nil && mr.State == forge.StateOpen {
+			if err := r.Forge.CloseCR(ctx, r.LedgerProject, mr.ID, fmt.Sprintf("Closed by ship-controller: Promotion %s/%s was deleted.", p.Namespace, p.Name)); err != nil {
 				return err
 			}
 		}

@@ -110,6 +110,12 @@ ENV_MR=$(mr_by_branch "sda/services/$GW/DEV" "ship/$GW/DEV/${A:${#A}-64:12}")
 by=$(api "$ROOT_TOKEN" GET "/projects/$(enc "sda/services/$GW/DEV")/merge_requests/$ENV_MR/approvals" | jq -r '[.approved_by[].user.username]|join(",")')
 [[ $by == ship-approver ]] || die "env MR approvals: $by"
 ok "env MR !$ENV_MR authored by ship-bot, approved by ship-approver, merged"
+vars=$(api "$ROOT_TOKEN" GET "/groups/sda/variables" | jq -r '[.[].key]|join(",")')
+[[ ,$vars, != *,SHIP_APPROVER_TOKEN,* ]] || die "approver token must not be a CI variable"
+envsha=$(api "$ROOT_TOKEN" GET "/projects/$(enc "sda/services/$GW/DEV")/merge_requests/$ENV_MR" | jq -r .sha)
+envlog=$(job_log "sda/services/$GW/DEV" "$envsha" ship-verify-env-mr)
+[[ $envlog == *"approved by ship-approver (service)"* && $envlog != *"approved as ship-approver"* ]] || die "env CI should only verify; approval must come from the service"
+ok "approver token absent from env CI (vars: $vars); approval came from the approver service"
 
 log "3. skipping TEST is rejected"
 if ship promote --app "$GW" --stage PROD --freight "$A" >/dev/null 2>&1; then die "CLI pre-check should refuse"; fi
@@ -152,6 +158,12 @@ siid=$(api "$BOT_TOKEN" POST "/projects/$(enc "$DEVP")/merge_requests" "$(jq -n 
 by=$(api "$ROOT_TOKEN" GET "/projects/$(enc "$DEVP")/merge_requests/$siid/approvals" | jq -r '.approved_by|length')
 [[ $by == 0 ]] || die "tampered MR was approved"
 ok "tampered bot MR !$siid: verify-env-mr failed, no approval"
+for _ in $(seq 1 15); do
+  notes=$(api "$ROOT_TOKEN" GET "/projects/$(enc "$DEVP")/merge_requests/$siid/notes" | jq -r '[.[]|select(.author.username=="ship-approver")|.body]|join("\n")')
+  [[ $notes == *"did not approve"* ]] && break; sleep 2
+done
+[[ $notes == *"did not approve"* ]] || die "approver service should explain the refusal on the MR"
+ok "approver service commented why it did not approve !$siid"
 B=$(pushfreight --repo "$GW_REPO" --version 1.1.0)
 promote_ok "$GW" DEV "$B"
 st=$(api "$ROOT_TOKEN" GET "/projects/$(enc "$DEVP")/merge_requests/$siid" | jq -r .state)
@@ -259,6 +271,42 @@ iid=$(mr_iid "gw-dev-d-$RUN")
 kubectl -n $NS delete promotion "gw-dev-d-$RUN" --wait=true >/dev/null
 [[ $(api "$ROOT_TOKEN" GET "/projects/$(enc $LEDGER)/merge_requests/$iid" | jq -r .state) == closed ]] || die "MR not closed"
 ok "Promotion deleted → ledger MR !$iid closed"
+
+log "17. Octopus app: payments → DEV through the octopus driver (fake checked against Octopus's official API spec)"
+OCT=http://octopus:8081/api/Spaces-1
+oct() { curl -fsS -H "X-Octopus-ApiKey: $OCTOPUS_API_KEY" "$OCT$1"; }
+PV="2.0.$RUN"
+PAY=$(pushfreight --repo "$REG/deploy/payments" --version "$PV")
+promote_ok payments DEV "$PAY"
+rel=$(oct "/projects/Projects-1/releases/$PV")
+[[ $(jq -r .ReleaseNotes <<<"$rel") == *"${PAY##*@}"* ]] || die "Octopus release $PV should record the pinned digest"
+dep=$(oct "/deployments?projects=Projects-1&environments=Environments-1&take=1" | jq '.Items[0]')
+[[ $(jq -r .ReleaseId <<<"$dep") == $(jq -r .Id <<<"$rel") ]] || die "latest Development deployment is not release $PV"
+[[ $(oct "/tasks/$(jq -r .TaskId <<<"$dep")" | jq -r .State) == Success ]] || die "Octopus task not successful"
+[[ $(jq -r .Comments <<<"$dep") == *"merge_requests"* ]] || die "deployment should link the ledger MR"
+ok "Octopus release $PV (pinned digest in notes) deployed to Development; deployment links the ledger MR"
+
+log "18. a failed Octopus deploy (Test fails in the fake) fails the pipeline and keeps payments out of PROD"
+sync
+SHIP_REQUESTED_BY="agent:e2e" ship promote --app payments --stage TEST --freight "$PAY" --reason "e2e payments to TEST" --push >/dev/null
+iid=$(mr_by_branch "$LEDGER" "promote/payments/TEST/${PAY:${#PAY}-64:12}")
+[[ $(wait_mr_pipeline "$LEDGER" "$iid") == success ]] || die "validate failed for payments TEST"
+api "$REVIEWER_TOKEN" POST "/projects/$(enc $LEDGER)/merge_requests/$iid/approve" >/dev/null
+merge=$(api "$REVIEWER_TOKEN" PUT "/projects/$(enc $LEDGER)/merge_requests/$iid/merge" '{"should_remove_source_branch":true}' | jq -r .merge_commit_sha)
+[[ $(wait_sha_pipeline "$LEDGER" "$merge") == failed ]] || die "deploy to the failing Test environment should fail the pipeline"
+deploylog=$(job_log "$LEDGER" "$merge" ship-deploy)
+[[ $deploylog == *"Failed"* ]] || die "deploy log should report the failed Octopus deployment"
+ok "deploy pipeline failed with the Octopus task failure"
+ship attest --freight "$PAY" --kind integration-test --stage TEST --result pass >/dev/null   # rule out V6
+propose_raw_expect_fail payments-prod "never successfully deployed there" "ledger/payments/PROD.yaml=freight: $PAY"$'\n'
+
+log "19. fakes: no contract violations against the official specs"
+for svc in octopus:8081 kosli:8082; do
+  v=$(curl -fsS "http://$svc/_contract/violations")
+  [[ $(jq '.violations|length' <<<"$v") == 0 ]] || { jq . <<<"$v"; die "$svc: contract violations"; }
+  echo "     ${svc%%:*}: $(jq .calls <<<"$v") calls validated"
+done
+ok "Octopus and Kosli fakes: 0 contract violations"
 
 log "kubectl get promotions"
 kubectl -n $NS get promotions

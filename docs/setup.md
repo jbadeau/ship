@@ -42,7 +42,7 @@ GitLab (Ultimate)
 │
 └── Service accounts
       ship-bot        opens env MRs, pushes ship/* branches          (no approve rights that matter)
-      ship-approver   approves env MRs after provenance check        (never authors anything)
+      ship-approver   approves env MRs after provenance check        (token only in the approver service; never authors anything)
 ```
 
 Policies are enforced from the policy project, so a team cannot delete the
@@ -155,11 +155,12 @@ ship-verify-env-mr:
   stage: .pipeline-policy-pre                  # runs before (and independent of) team jobs
   image: registry.example.com/platform/ship:<version>
   rules: [{ if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^ship\// }]
-  script: [ship verify-env-mr]                 # SHIP_LEDGER_PROJECT=platform/ledger
+  script: [ship verify-env-mr --no-approve]    # report only; SHIP_READ_TOKEN (read_api), SHIP_LEDGER_PROJECT
 ```
 
 Human MRs need a human from `env-approvers`. Ship MRs get their approval from
-`ship-approver`, only after `verify-env-mr` proves provenance.
+`ship-approver`, which only the approver service (§4) holds, and only after the
+same provenance check passes.
 
 ## 4. ⚠ Protecting the ship-approver credential
 
@@ -174,8 +175,15 @@ exposed to MR pipelines of unprotected branches anyway. Options:
 | B. Vault + OIDC | The job exchanges its GitLab ID token at Vault; Vault only issues the approver token when claims match (project in env groups, ref `ship/*`, job from the policy CI config). | Depends on the ID-token claims reliably identifying policy-injected jobs; needs verification on our GitLab version. |
 | C. Protected `ship/*` branches | Protect `ship/*` (push: ship-bot only) so the protected variable is available, and run env MR pipelines with `override_project_ci` for those branches. | Team jobs don't run on ship MRs; more policy complexity. |
 
-The MVP implements the check as a CLI (`ship verify-env-mr`), which both A and B
-reuse; the sandbox uses a plain variable (CE has no policies).
+**Implemented: option A**, `ship approver` ([approver-service.md](approver-service.md),
+`deploy/approver.yaml`). Setup:
+
+1. Create the Secret `ship-system/ship-approver` with the ship-approver token and a
+   random webhook secret, and deploy `deploy/approver.yaml`.
+2. Add a group webhook on each env group (`sda/services`, `sda/applications`):
+   URL `https://<approver>/webhook`, the webhook secret, merge request events only.
+3. Give env-repo CI only a `read_api` token as `SHIP_READ_TOKEN` (for the report-only
+   `ship verify-env-mr --no-approve` job). Never put the approver token in CI.
 
 ## 5. End-to-end flow for one promotion
 

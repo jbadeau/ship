@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitx"
-	"github.com/jbadeau/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/ledger"
 )
 
 type Checker struct {

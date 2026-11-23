@@ -1,0 +1,57 @@
+# ship approver service (docs/approver-service.md). The ship-approver token lives
+# only in the ship-approver Secret below, never in CI.
+#
+#   kubectl -n ship-system create secret generic ship-approver \
+#     --from-literal=token=<ship-approver PAT> --from-literal=webhook-secret=$(openssl rand -hex 32)
+#
+# Then add a group webhook on each env group (sda/services, sda/applications):
+# URL https://ship-approver.example.com/webhook, secret token = webhook-secret,
+# trigger: merge request events only.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ship-approver, namespace: ship-system }
+spec:
+  replicas: 1                     # approvals are idempotent; a rollout overlap is harmless
+  selector: { matchLabels: { app: ship-approver } }
+  template:
+    metadata: { labels: { app: ship-approver } }
+    spec:
+      automountServiceAccountToken: false   # needs no Kubernetes API access
+      containers:
+        - name: approver
+          image: registry.example.com/platform/ship:latest
+          args: [ship, approver, --listen, ":8080", --sweep, 5m]
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: SHIP_GITLAB_URL, value: https://gitlab.example.com }
+            - { name: SHIP_LEDGER_PROJECT, value: platform/ledger }
+            - { name: SHIP_ENV_GROUPS, value: "sda/services,sda/applications" }
+            - name: SHIP_APPROVER_TOKEN
+              valueFrom: { secretKeyRef: { name: ship-approver, key: token } }
+            - name: SHIP_WEBHOOK_SECRET
+              valueFrom: { secretKeyRef: { name: ship-approver, key: webhook-secret } }
+          readinessProbe: { httpGet: { path: /healthz, port: http } }
+          livenessProbe: { httpGet: { path: /healthz, port: http } }
+          securityContext: { readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ship-approver, namespace: ship-system }
+spec:
+  selector: { app: ship-approver }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+# Expose /webhook to GitLab only (restrict source ranges to the GitLab egress IPs).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ship-approver
+  namespace: ship-system
+  annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8"   # GitLab egress range
+spec:
+  rules:
+    - host: ship-approver.example.com
+      http:
+        paths:
+          - { path: /webhook, pathType: Exact, backend: { service: { name: ship-approver, port: { name: http } } } }

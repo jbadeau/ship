@@ -36,7 +36,7 @@ api() { # api METHOD PATH [JSON]
 enc() { jq -rn --arg s "$1" '$s|@uri'; }
 
 # Faster CI feedback for the sandbox.
-api PUT "/application/settings?auto_devops_enabled=false&signup_enabled=false" >/dev/null
+api PUT "/application/settings?auto_devops_enabled=false&signup_enabled=false&allow_local_requests_from_web_hooks_and_services=true" >/dev/null
 
 # ---------- users + tokens ----------
 user_id() { api GET "/users?username=$1" | jq -r '.[0].id // empty'; }
@@ -49,14 +49,14 @@ ensure_user() {
   fi
   echo "$id"
 }
-token_for() { # user var
-  local u=$1 var=$2 id
+token_for() { # user var [scopes-json]
+  local u=$1 var=$2 scopes=${3:-'["api","write_repository"]'} id
   if [[ -n "${!var:-}" ]] && curl -fsS -H "PRIVATE-TOKEN: ${!var}" "$API/user" >/dev/null 2>&1; then return; fi
   id=$(ensure_user "$u")
   local t
-  t=$(api POST "/users/$id/personal_access_tokens" "$(jq -n --arg n "ship-e2e" \
+  t=$(api POST "/users/$id/personal_access_tokens" "$(jq -n --arg n "ship-e2e" --argjson s "$scopes" \
       --arg e "$(date -v+30d +%F 2>/dev/null || date -d '+30 days' +%F)" \
-      '{name:$n, scopes:["api","write_repository"], expires_at:$e}')" | jq -r .token)
+      '{name:$n, scopes:$s, expires_at:$e}')" | jq -r .token)
   printf -v "$var" '%s' "$t"
   echo "$var=$t" >> "$STATE"
 }
@@ -66,6 +66,17 @@ token_for ship-approver APPROVER_TOKEN
 token_for promoter PROMOTER_TOKEN
 token_for reviewer REVIEWER_TOKEN
 token_for ship-promoter SHIPPROMOTER_TOKEN
+token_for ship-approver APPROVER_READ_TOKEN '["read_api"]'   # env-repo CI: check only, cannot approve
+# Credentials for the Octopus and Kosli fakes (e2e/tools/fakes).
+if [[ -z "${OCTOPUS_API_KEY:-}" ]]; then
+  OCTOPUS_API_KEY="API-$(openssl rand -hex 12 | tr a-f A-F)"; echo "OCTOPUS_API_KEY=$OCTOPUS_API_KEY" >> "$STATE"
+fi
+if [[ -z "${KOSLI_TOKEN:-}" ]]; then
+  KOSLI_TOKEN=$(openssl rand -hex 24); echo "KOSLI_TOKEN=$KOSLI_TOKEN" >> "$STATE"
+fi
+if [[ -z "${WEBHOOK_SECRET:-}" ]]; then
+  WEBHOOK_SECRET=$(openssl rand -hex 24); echo "WEBHOOK_SECRET=$WEBHOOK_SECRET" >> "$STATE"
+fi
 
 # ---------- groups + projects ----------
 group_id() { api GET "/groups/$(enc "$1")" 2>/dev/null | jq -r '.id // empty' || true; }
@@ -126,8 +137,12 @@ seed_env() { # project_path claim_path claim_fixture name
   if ! api GET "/projects/$pid/repository/files/.gitlab-ci.yml?ref=main" >/dev/null 2>&1; then
     sed -e "s/__NAME__/$4/g" -e "s/__NAMESPACE__/$(echo "${1##*/}" | tr 'A-Z' 'a-z')/g" "fixtures/claims/$3" > "$tmp/claim.yaml"
     commit_files "$pid" "Bootstrap env repo" .gitlab-ci.yml=fixtures/env/.gitlab-ci.yml "$2=$tmp/claim.yaml"
+  elif ! diff -q <(api GET "/projects/$pid/repository/files/.gitlab-ci.yml/raw?ref=main") fixtures/env/.gitlab-ci.yml >/dev/null; then
+    commit_files "$pid" "Update CI" .gitlab-ci.yml=fixtures/env/.gitlab-ci.yml
   fi
+  ENV_PIDS+=("$pid")
 }
+ENV_PIDS=()
 for st in DEV TEST PROD; do
   log "env repos: sda/services/SV-API_GW_MGT/$st, sda/applications/CUSTOMER_PORTAL/$st"
   seed_env "sda/services/SV-API_GW_MGT/$st" claim.yaml service.yaml sv-api-gw-mgt
@@ -153,7 +168,23 @@ setvar() { # kind id key value masked
 }
 log "CI variables"
 setvar projects "$LEDGER" SHIP_GITLAB_TOKEN "$BOT_TOKEN" true
-setvar groups "$SDA" SHIP_APPROVER_TOKEN "$APPROVER_TOKEN" true
+setvar projects "$LEDGER" OCTOPUS_URL http://octopus:8081 false
+setvar projects "$LEDGER" OCTOPUS_API_KEY "$OCTOPUS_API_KEY" true
+# The approver token is NOT a CI variable: only the approver service holds it.
+api DELETE "/groups/$SDA/variables/SHIP_APPROVER_TOKEN" >/dev/null 2>&1 || true
+setvar groups "$SDA" SHIP_READ_TOKEN "$APPROVER_READ_TOKEN" true
+
+# ---------- webhooks → approver service ----------
+# Production: one group webhook per env group (Premium+). CE: project hooks.
+log "env repo webhooks → http://approver:8080/webhook"
+HOOK=http://approver:8080/webhook
+for pid in "${ENV_PIDS[@]}"; do
+  for hid in $(api GET "/projects/$pid/hooks" | jq -r --arg u "$HOOK" '.[] | select(.url==$u) | .id'); do
+    api DELETE "/projects/$pid/hooks/$hid" >/dev/null
+  done
+  api POST "/projects/$pid/hooks" "$(jq -n --arg u "$HOOK" --arg t "$WEBHOOK_SECRET" \
+    '{url:$u, token:$t, merge_requests_events:true, push_events:false, enable_ssl_verification:false}')" >/dev/null
+done
 setvar groups "$SDA" SHIP_LEDGER_PROJECT platform/ledger false
 
 # ---------- runner ----------
@@ -195,7 +226,7 @@ subjects:
   - { apiGroup: rbac.authorization.k8s.io, kind: User, name: reviewer }
 YAML
 
-log "starting ship-controller"
-docker compose --profile controller up -d --force-recreate controller >/dev/null
+log "starting ship-controller, ship-approver and the Octopus/Kosli fakes"
+docker compose --profile controller up -d --force-recreate controller approver fakes >/dev/null
 
 log "done. tokens in e2e/$STATE"

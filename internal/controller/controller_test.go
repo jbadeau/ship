@@ -21,10 +21,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/jbadeau/ship/api/v1alpha1"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/testutil"
+	"juliusbaer.com/codeak/ship/api/v1alpha1"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitlab"
+	"juliusbaer.com/codeak/ship/internal/secret"
+	"juliusbaer.com/codeak/ship/internal/testutil"
 )
 
 // ---------- fake GitLab (only what the controller uses) ----------
@@ -173,7 +174,7 @@ stages:
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Promotion{}).Build()
 	cache := &LedgerCache{Dir: filepath.Join(t.TempDir(), "ledger.git"), URL: repo.Dir, Branch: "main"}
 	return &fixture{t: t, gl: gl, host: host, c: c, git: repo.Dir, r: &Reconciler{
-		Client: c, GitLab: gitlab.New(srv.URL, "tok"), Reg: freight.NewOCI([]string{host}),
+		Client: c, Forge: gitlab.New(srv.URL, secret.Static("tok")), Reg: freight.NewOCI([]string{host}),
 		LedgerProject: "platform/ledger", Ledger: cache, Poll: time.Second}}
 }
 
@@ -246,7 +247,7 @@ func TestPromotionLifecycle(t *testing.T) {
 	}
 
 	// Status check (pre-merge V8) reports failed, then passed after an independent approval.
-	sc := &StatusChecker{Reader: f.c, GitLab: f.r.GitLab, LedgerProject: "platform/ledger", Ledger: f.r.Ledger, CheckID: 7}
+	sc := &StatusChecker{Reader: f.c, Forge: f.r.Forge, LedgerProject: "platform/ledger", Ledger: f.r.Ledger, CheckKey: "7"}
 	if err := sc.Once(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +329,8 @@ func TestStatusCheckRequiresLivePromotion(t *testing.T) {
 		m.approvers = []string{"bob"}
 		m.Description = strings.Replace(m.Description, string(p.UID), "forged-uid", 1)
 	})
-	sc := &StatusChecker{Reader: f.c, GitLab: f.r.GitLab, LedgerProject: "platform/ledger", Ledger: f.r.Ledger, CheckID: 7}
-	ok, why, err := sc.Evaluate(context.Background(), m.MR)
+	sc := &StatusChecker{Reader: f.c, Forge: f.r.Forge, LedgerProject: "platform/ledger", Ledger: f.r.Ledger, CheckKey: "7"}
+	ok, why, err := sc.Evaluate(context.Background(), m.MR.CR())
 	if err != nil || ok || !strings.Contains(why, "UID mismatch") {
 		t.Fatalf("expected UID mismatch failure, got ok=%v why=%q err=%v", ok, why, err)
 	}

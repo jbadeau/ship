@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/ledger"
-	"github.com/jbadeau/ship/internal/policy"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/policy"
 )
 
 type Options struct {

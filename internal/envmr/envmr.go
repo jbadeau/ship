@@ -11,16 +11,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jbadeau/ship/internal/approval"
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/driver/crossplane"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/approval"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/driver/crossplane"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/ledger"
 )
 
 type Verifier struct {
-	GitLab        *gitlab.Client // authenticated as ship-approver
+	Forge         forge.Forge // authenticated as ship-approver (or read-only with approve=false)
 	Reg           freight.Registry
 	LedgerProject string
 	EnvProject    string
@@ -29,9 +29,12 @@ type Verifier struct {
 
 type Verdict struct {
 	ShipMR   bool
+	SHA      string   // head SHA that was verified (and approved, if Approved)
+	State    string   // forge.State*; only open CRs are verified
 	Checks   []string // passed checks, for the job log
 	Failures []string
 	Approved bool
+	Already  bool // Approved was already true before this run (no new approval)
 }
 
 func (v *Verdict) pass(format string, a ...any) {
@@ -45,15 +48,18 @@ func (v *Verdict) fail(format string, a ...any) {
 // output of a merged, approved ledger promotion.
 func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, error) {
 	var v Verdict
-	gl := vf.GitLab
-	mr, err := gl.MR(ctx, vf.EnvProject, iid)
+	gl := vf.Forge
+	mr, err := gl.CR(ctx, vf.EnvProject, iid)
 	if err != nil {
 		return v, err
 	}
 	if !strings.HasPrefix(mr.SourceBranch, "ship/") {
 		return v, nil // not a ship MR: normal approval rules apply
 	}
-	v.ShipMR = true
+	v.ShipMR, v.SHA, v.State = true, mr.HeadSHA, mr.State
+	if mr.State != forge.StateOpen {
+		return v, nil // merged/closed: nothing to verify or approve
+	}
 
 	// Branch: ship/<app>/<stage>/<digest12>
 	parts := strings.Split(mr.SourceBranch, "/")
@@ -64,7 +70,7 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 	app, stage, short := parts[1], parts[2], parts[3]
 
 	// Policy comes from the ledger default branch.
-	lp, err := gl.Project(ctx, vf.LedgerProject)
+	lp, err := gl.Repo(ctx, vf.LedgerProject)
 	if err != nil {
 		return v, err
 	}
@@ -82,12 +88,12 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 	}
 
 	// 1. author
-	if cfg.GitLab.BotUsername == "" {
-		v.fail("ship.yaml gitlab.botUsername is not set")
-	} else if mr.Author.Username != cfg.GitLab.BotUsername {
-		v.fail("author is %q, expected bot %q", mr.Author.Username, cfg.GitLab.BotUsername)
+	if cfg.Forge.BotUsername == "" {
+		v.fail("ship.yaml forge.botUsername is not set")
+	} else if mr.Author != cfg.Forge.BotUsername {
+		v.fail("author is %q, expected bot %q", mr.Author, cfg.Forge.BotUsername)
 	} else {
-		v.pass("author is %s", mr.Author.Username)
+		v.pass("author is %s", mr.Author)
 	}
 
 	// 2. app/stage/driver/target
@@ -109,7 +115,7 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 		v.fail("%s/%s deploys to %q, not this repo %q", app, stage, tgt.EnvRepo, vf.EnvProject)
 		return v, nil
 	}
-	ep, err := gl.Project(ctx, vf.EnvProject)
+	ep, err := gl.Repo(ctx, vf.EnvProject)
 	if err != nil {
 		return v, err
 	}
@@ -154,13 +160,13 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 	// 4. ledger MR merged, produced that commit, and was approved by someone other than its author.
 	if lmr == 0 {
 		v.fail("missing Ledger-MR trailer")
-	} else if lm, err := gl.MR(ctx, vf.LedgerProject, lmr); err != nil {
+	} else if lm, err := gl.CR(ctx, vf.LedgerProject, lmr); err != nil {
 		v.fail("ledger MR !%d: %v", lmr, err)
 	} else {
-		if lm.State != "merged" {
+		if lm.State != forge.StateMerged {
 			v.fail("ledger MR !%d is %s, not merged", lmr, lm.State)
 		}
-		if lcommit != "" && !slices.Contains([]string{lm.MergeCommitSHA, lm.SquashCommitSHA, lm.SHA}, lcommit) {
+		if lcommit != "" && !slices.Contains(lm.MergeSHAs, lcommit) {
 			v.fail("ledger MR !%d did not produce commit %s", lmr, lcommit)
 		}
 		facts, err := approval.Gather(ctx, gl, vf.LedgerProject, lm)
@@ -179,15 +185,15 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 	if err != nil {
 		return v, err
 	}
-	if len(diffs) != 1 || diffs[0].NewPath != tgt.Path || diffs[0].OldPath != tgt.Path || diffs[0].NewFile || diffs[0].DeletedFile || diffs[0].RenamedFile {
+	if len(diffs) != 1 || diffs[0].NewPath != tgt.Path || diffs[0].OldPath != tgt.Path || diffs[0].Created || diffs[0].Deleted || diffs[0].Renamed {
 		var paths []string
 		for _, d := range diffs {
 			paths = append(paths, d.NewPath)
 		}
 		v.fail("MR must change exactly %s, changes %v", tgt.Path, paths)
 	} else if found && pin.Freight == fr {
-		baseClaim, ok1, err1 := gl.File(ctx, vf.EnvProject, tgt.Path, mr.DiffRefs.BaseSHA)
-		headClaim, ok2, err2 := gl.File(ctx, vf.EnvProject, tgt.Path, mr.SHA)
+		baseClaim, ok1, err1 := gl.File(ctx, vf.EnvProject, tgt.Path, mr.BaseSHA)
+		headClaim, ok2, err2 := gl.File(ctx, vf.EnvProject, tgt.Path, mr.HeadSHA)
 		mf, ok3, err3 := gl.File(ctx, vf.LedgerProject, tgt.Mapping, mainSHA)
 		if !ok1 || !ok2 || !ok3 || err1 != nil || err2 != nil || err3 != nil {
 			return v, fmt.Errorf("read claim/mapping: %v %v %v", err1, err2, err3)
@@ -207,26 +213,26 @@ func (vf Verifier) Verify(ctx context.Context, iid int, approve bool) (Verdict, 
 	if len(v.Failures) > 0 || !approve {
 		return v, nil
 	}
-	by, err := gl.ApprovedBy(ctx, vf.EnvProject, iid)
+	by, err := gl.Approvers(ctx, vf.EnvProject, iid)
 	if err != nil {
 		return v, err
 	}
-	me, err := gl.CurrentUser(ctx)
+	me, err := gl.Whoami(ctx)
 	if err != nil {
 		return v, err
 	}
-	if slices.Contains(by, me.Username) {
-		v.Approved = true
+	if slices.Contains(by, me) {
+		v.Approved, v.Already = true, true
 		return v, nil
 	}
-	if err := gl.Approve(ctx, vf.EnvProject, iid, mr.SHA); err != nil {
+	if err := gl.Approve(ctx, vf.EnvProject, iid, mr.HeadSHA); err != nil {
 		return v, fmt.Errorf("approve: %w", err)
 	}
 	v.Approved = true
-	note := "✅ **ship verify-env-mr** approved this MR as `" + me.Username + "`:\n\n"
+	note := "✅ **ship verify-env-mr** approved this MR as `" + me + "`:\n\n"
 	for _, c := range v.Checks {
 		note += "- " + c + "\n"
 	}
-	_ = gl.Note(ctx, vf.EnvProject, iid, note)
+	_ = gl.Comment(ctx, vf.EnvProject, iid, note)
 	return v, nil
 }

@@ -12,8 +12,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/secret"
 )
 
 // ErrNotSupported is returned by Wait when the driver cannot observe health.
@@ -70,7 +71,8 @@ type Health struct {
 
 // Deps are shared clients handed to drivers.
 type Deps struct {
-	GitLab   *gitlab.Client
+	Forge    forge.Forge      // nil when no forge token is configured
+	Secrets  *secret.Resolver // driver secrets (e.g. octopus-api-key); nil = none
 	Registry freight.Registry
 	Log      io.Writer
 }

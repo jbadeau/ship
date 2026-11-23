@@ -85,6 +85,36 @@ services:
     command: ["sh", "-c", "SHIP_GITLAB_TOKEN=$$SHIPPROMOTER_TOKEN exec ship controller --poll 5s"]
     restart: unless-stopped
 
+  # Octopus and Kosli fakes, validated against the official specs (internal/fakes).
+  fakes:
+    image: ship:dev
+    profiles: [controller]
+    env_file:
+      - path: .state.env
+        required: false
+    volumes:
+      - ./fixtures/fakes:/seed:ro
+    command: ["sh", "-c", "KOSLI_TOKENS=$$KOSLI_TOKEN=ship-deploy exec fakes --octopus :8081 --octopus-seed /seed/octopus.yaml --kosli :8082"]
+    networks:
+      default:
+        aliases: [octopus, kosli]
+    restart: unless-stopped
+
+  # Approver service: the only holder of the ship-approver token (docs/approver-service.md).
+  approver:
+    image: ship:dev
+    profiles: [controller]
+    env_file:
+      - path: .state.env
+        required: false
+    environment:
+      SHIP_GITLAB_URL: http://gitlab:8929
+      SHIP_LEDGER_PROJECT: platform/ledger
+      SHIP_ENV_GROUPS: sda/services,sda/applications
+      SHIP_INSECURE_REGISTRIES: registry:5001
+    command: ["sh", "-c", "SHIP_APPROVER_TOKEN=$$APPROVER_TOKEN SHIP_WEBHOOK_SECRET=$$WEBHOOK_SECRET exec ship approver --sweep 30s"]
+    restart: unless-stopped
+
 volumes:
   k3s-data:
   gitlab-config:

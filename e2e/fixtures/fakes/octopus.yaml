@@ -1,0 +1,11 @@
+# Seed for the Octopus fake (e2e/tools/fakes). Deployments to environments in
+# failEnvironments fail, to exercise failed deploys.
+failEnvironments: [Test]
+spaces:
+  Spaces-1:
+    projects:
+      - { id: Projects-1, name: payments, slug: payments }
+    environments:
+      - { id: Environments-1, name: Development }
+      - { id: Environments-2, name: Test }
+      - { id: Environments-3, name: Production }

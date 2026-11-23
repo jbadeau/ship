@@ -7,7 +7,7 @@ apiVersion: ship/v1alpha1
 registries:
   "registry:5001": { insecure: true }
 
-gitlab:
+forge:
   ledgerProject: platform/ledger
   botUsername: ship-bot              # opens env MRs
   promoterUsername: ship-promoter    # opens ledger MRs for Promotion CRs
@@ -41,6 +41,16 @@ apps:
     repository: registry:5001/deploy/portal
     vars: { group: CUSTOMER_PORTAL }
     deploy: { template: application }
+  # Deployed by Octopus (fake in the sandbox): one release per Freight version.
+  payments:
+    repository: registry:5001/deploy/payments
+    deploy:
+      driver: octopus
+      config: { project: payments, packageStep: deploy-payments }
+      stages:
+        DEV:  { environment: Development }
+        TEST: { environment: Test }
+        PROD: { environment: Production }
 
 stages:
   - name: DEV

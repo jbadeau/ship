@@ -23,14 +23,17 @@ type File struct {
 	DeployTemplates map[string]Deploy         `yaml:"deployTemplates,omitempty"`
 	Stages          []Stage                   `yaml:"stages"`
 	Registries      map[string]RegistryConfig `yaml:"registries,omitempty"`
-	GitLab          GitLabConfig              `yaml:"gitlab,omitempty"`
+	Forge           ForgeConfig               `yaml:"forge,omitempty"`
+	// Deprecated: the pre-adapter name of the forge section. Accepted when forge
+	// is not set; setting both is an error.
+	LegacyGitLab *ForgeConfig `yaml:"gitlab,omitempty"`
 	// Identities maps a requester identity (Kubernetes username, agent id, …) to
-	// a GitLab username, for V8. Unmapped identities are used as-is.
+	// a forge username, for V8. Unmapped identities are used as-is.
 	Identities map[string]string `yaml:"identities,omitempty"`
 }
 
-// GitLabUser maps a requester identity to a GitLab username.
-func (f *File) GitLabUser(identity string) string {
+// ForgeUser maps a requester identity to a forge username.
+func (f *File) ForgeUser(identity string) string {
 	if u, ok := f.Identities[identity]; ok {
 		return u
 	}
@@ -93,8 +96,12 @@ type RegistryConfig struct {
 	Insecure bool `yaml:"insecure,omitempty"`
 }
 
-// GitLabConfig holds settings used by the env-repo provenance check.
-type GitLabConfig struct {
+// ForgeConfig names ship's accounts on the forge and the ledger approval rule.
+// Field names keep their GitLab-era spelling; "project" means repo on any forge.
+type ForgeConfig struct {
+	// Type is the forge adapter the ledger expects (default gitlab). Informational
+	// for now: the runtime forge is selected by SHIP_FORGE (docs/adapters.md).
+	Type               string `yaml:"type,omitempty"`
 	LedgerProject      string `yaml:"ledgerProject,omitempty"`
 	BotUsername        string `yaml:"botUsername,omitempty"`      // ship-bot: env MRs
 	PromoterUsername   string `yaml:"promoterUsername,omitempty"` // ship-promoter: ledger MRs from Promotion CRs
@@ -102,8 +109,8 @@ type GitLabConfig struct {
 	LedgerMinApprovals int    `yaml:"ledgerMinApprovals,omitempty"`
 }
 
-// ServiceAccounts lists ship's own GitLab accounts; their approvals never count (V8).
-func (g GitLabConfig) ServiceAccounts() []string {
+// ServiceAccounts lists ship's own forge accounts; their approvals never count (V8).
+func (g ForgeConfig) ServiceAccounts() []string {
 	var out []string
 	for _, u := range []string{g.BotUsername, g.PromoterUsername, g.ApproverUsername} {
 		if u != "" {
@@ -128,8 +135,20 @@ func Parse(b []byte) (*File, error) {
 	if f.LedgerDir == "" {
 		f.LedgerDir = "ledger"
 	}
-	if f.GitLab.LedgerMinApprovals == 0 {
-		f.GitLab.LedgerMinApprovals = 1
+	if f.LegacyGitLab != nil {
+		if f.Forge != (ForgeConfig{}) {
+			return nil, fmt.Errorf("ship.yaml: set either forge or gitlab (deprecated), not both")
+		}
+		f.Forge, f.LegacyGitLab = *f.LegacyGitLab, nil
+		if f.Forge.Type == "" {
+			f.Forge.Type = "gitlab"
+		}
+	}
+	if f.Forge.Type == "" {
+		f.Forge.Type = "gitlab"
+	}
+	if f.Forge.LedgerMinApprovals == 0 {
+		f.Forge.LedgerMinApprovals = 1
 	}
 	if err := f.applyTemplates(); err != nil {
 		return nil, fmt.Errorf("ship.yaml: %w", err)

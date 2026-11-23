@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -11,23 +10,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/jbadeau/ship/api/v1alpha1"
-	"github.com/jbadeau/ship/internal/approval"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/trailer"
+	"juliusbaer.com/codeak/ship/api/v1alpha1"
+	"juliusbaer.com/codeak/ship/internal/approval"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/trailer"
 )
 
-// StatusChecker is the pre-merge half of V8: it serves a GitLab external status
-// check (Ultimate) on the ledger project, reporting "passed" for an MR only when
+// StatusChecker is the pre-merge half of V8: it reports a required check on
+// ledger CRs (on GitLab: an external status check, Ultimate), reporting "passed" for an MR only when
 // it has independent approval. With "status checks must pass" enabled, a
 // self-approved promotion cannot merge. It covers every open ledger MR, whether
 // it came from a Promotion CR, the CLI, or an agent.
 type StatusChecker struct {
 	Reader        client.Reader
-	GitLab        *gitlab.Client
+	Forge         forge.Forge
 	LedgerProject string
 	Ledger        *LedgerCache
-	CheckID       int
+	CheckKey      string // forge.Check.Key: GitLab external status check id
 	Interval      time.Duration
 
 	last map[int]string // iid -> "sha:passed|failed" already reported
@@ -50,7 +49,7 @@ func (s *StatusChecker) Start(ctx context.Context) error {
 
 // Evaluate decides V8 for one MR. For MRs opened from a Promotion CR, the CR must
 // still exist with the same UID, and its admission-checked requestedBy is a requester.
-func (s *StatusChecker) Evaluate(ctx context.Context, mr gitlab.MR) (bool, string, error) {
+func (s *StatusChecker) Evaluate(ctx context.Context, mr forge.ChangeRequest) (bool, string, error) {
 	cfg, _, err := s.Ledger.Load(ctx)
 	if err != nil {
 		return false, "", err
@@ -67,7 +66,7 @@ func (s *StatusChecker) Evaluate(ctx context.Context, mr gitlab.MR) (bool, strin
 		}
 		extra = append(extra, p.Spec.RequestedBy)
 	}
-	facts, err := approval.Gather(ctx, s.GitLab, s.LedgerProject, mr, extra...)
+	facts, err := approval.Gather(ctx, s.Forge, s.LedgerProject, mr, extra...)
 	if err != nil {
 		return false, "", err
 	}
@@ -82,7 +81,7 @@ func (s *StatusChecker) Once(ctx context.Context) error {
 	if s.last == nil {
 		s.last = map[int]string{}
 	}
-	mrs, err := s.GitLab.ListMRs(ctx, s.LedgerProject, url.Values{"state": {"opened"}, "target_branch": {s.Ledger.Branch}, "per_page": {"100"}})
+	mrs, err := s.Forge.ListCRs(ctx, s.LedgerProject, forge.CRQuery{State: forge.StateOpen, TargetBranch: s.Ledger.Branch})
 	if err != nil {
 		return err
 	}
@@ -91,15 +90,15 @@ func (s *StatusChecker) Once(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		key := fmt.Sprintf("%s:%v", mr.SHA, ok)
-		if s.last[mr.IID] == key {
+		key := fmt.Sprintf("%s:%v", mr.HeadSHA, ok)
+		if s.last[mr.ID] == key {
 			continue
 		}
-		if err := s.GitLab.StatusCheckResponse(ctx, s.LedgerProject, mr.IID, mr.SHA, s.CheckID, ok); err != nil {
+		if err := s.Forge.ReportCheck(ctx, s.LedgerProject, mr.ID, mr.HeadSHA, forge.Check{Key: s.CheckKey, Passed: ok, Summary: why}); err != nil {
 			return err
 		}
-		s.last[mr.IID] = key
-		log.FromContext(ctx).Info("status check", "mr", mr.IID, "passed", ok, "reason", why)
+		s.last[mr.ID] = key
+		log.FromContext(ctx).Info("status check", "mr", mr.ID, "passed", ok, "reason", why)
 	}
 	return nil
 }

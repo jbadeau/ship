@@ -1,5 +1,6 @@
 # Env repo CI. In production ship-verify-env-mr is injected by a pipeline execution
-# policy and the approver credential is not a CI variable (docs/setup.md §4).
+# policy (docs/setup.md). It only *reports*: approval comes from the ship approver
+# service, the only holder of the ship-approver token (docs/approver-service.md).
 default:
   image: ship:dev
 
@@ -11,4 +12,16 @@ team-checks:
 ship-verify-env-mr:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^ship\//'
-  script: [ship verify-env-mr]
+  script:
+    - ship verify-env-mr --no-approve            # SHIP_READ_TOKEN: read_api only
+    # Sandbox only: GitLab CE cannot *require* an approval before merge, so wait for
+    # the approver service here. On Premium/Ultimate the approval policy does this.
+    - |
+      for i in $(seq 1 60); do
+        by=$(curl -fsS -H "PRIVATE-TOKEN: $SHIP_READ_TOKEN" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/approvals" \
+          | jq -r '[.approved_by[].user.username] | join(",")')
+        case ",$by," in *,ship-approver,*) echo "approved by ship-approver (service)"; exit 0;; esac
+        sleep 2
+      done
+      echo "no approval from ship-approver within 120s"; exit 1

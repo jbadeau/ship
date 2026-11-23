@@ -7,16 +7,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/driver"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/mapping"
-	"github.com/jbadeau/ship/internal/textdiff"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/driver"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/mapping"
+	"juliusbaer.com/codeak/ship/internal/textdiff"
 )
 
 const Label = "ship"
@@ -80,11 +79,11 @@ type state struct {
 	rendered []byte
 }
 
-func (d Driver) gl() (*gitlab.Client, error) {
-	if d.Deps.GitLab == nil {
-		return nil, fmt.Errorf("crossplane driver: GitLab client not configured (SHIP_GITLAB_URL / SHIP_GITLAB_TOKEN)")
+func (d Driver) gl() (forge.Forge, error) {
+	if d.Deps.Forge == nil {
+		return nil, fmt.Errorf("crossplane driver: forge client not configured (SHIP_FORGE_URL / forge-token secret)")
 	}
-	return d.Deps.GitLab, nil
+	return d.Deps.Forge, nil
 }
 
 func (d Driver) load(ctx context.Context, r driver.Request) (state, error) {
@@ -97,7 +96,7 @@ func (d Driver) load(ctx context.Context, r driver.Request) (state, error) {
 		return state{}, err
 	}
 	if t.TargetBranch == "" {
-		p, err := gl.Project(ctx, t.EnvRepo)
+		p, err := gl.Repo(ctx, t.EnvRepo)
 		if err != nil {
 			return state{}, err
 		}
@@ -140,15 +139,15 @@ func (d Driver) Apply(ctx context.Context, r driver.Request) (driver.Result, err
 	if err != nil {
 		return driver.Result{}, err
 	}
-	gl := d.Deps.GitLab
+	gl := d.Deps.Forge
 	if bytes.Equal(s.current, s.rendered) {
 		return driver.Result{Summary: "claim already up to date"}, nil
 	}
-	open, err := gl.ListMRs(ctx, s.t.EnvRepo, url.Values{"state": {"opened"}, "labels": {Label}, "per_page": {"100"}})
+	open, err := gl.ListCRs(ctx, s.t.EnvRepo, forge.CRQuery{State: forge.StateOpen, Label: Label})
 	if err != nil {
 		return driver.Result{}, err
 	}
-	var mine *gitlab.MR
+	var mine *forge.ChangeRequest
 	prefix := fmt.Sprintf("ship/%s/%s/", r.App, r.Stage)
 	for i := range open {
 		mr := open[i]
@@ -156,8 +155,8 @@ func (d Driver) Apply(ctx context.Context, r driver.Request) (driver.Result, err
 		case mr.SourceBranch == s.branch:
 			mine = &open[i]
 		case strings.HasPrefix(mr.SourceBranch, prefix):
-			d.Deps.Logf("closing superseded env MR !%d (%s)", mr.IID, mr.SourceBranch)
-			if err := gl.CloseMR(ctx, s.t.EnvRepo, mr.IID, "Superseded by promotion of "+r.Freight.Ref); err != nil {
+			d.Deps.Logf("closing superseded env MR !%d (%s)", mr.ID, mr.SourceBranch)
+			if err := gl.CloseCR(ctx, s.t.EnvRepo, mr.ID, "Superseded by promotion of "+r.Freight.Ref); err != nil {
 				return driver.Result{}, err
 			}
 		}
@@ -172,45 +171,45 @@ func (d Driver) Apply(ctx context.Context, r driver.Request) (driver.Result, err
 			}
 		}
 		msg := fmt.Sprintf("ship: %s to %s (%s)\n\n%s", r.App, r.Stage, r.Freight.Short(), trailers(r))
-		if err := gl.CreateCommit(ctx, s.t.EnvRepo, s.branch, s.t.TargetBranch, msg,
-			[]gitlab.CommitAction{{Action: "update", FilePath: s.t.Path, Content: string(s.rendered)}}); err != nil {
+		if err := gl.Commit(ctx, s.t.EnvRepo, forge.CommitSpec{Branch: s.branch, StartBranch: s.t.TargetBranch, Message: msg,
+			Files: []forge.FileChange{{Path: s.t.Path, Content: string(s.rendered)}}}); err != nil {
 			return driver.Result{}, err
 		}
-		mr, err := gl.CreateMR(ctx, s.t.EnvRepo, map[string]any{
-			"source_branch": s.branch, "target_branch": s.t.TargetBranch,
-			"title":       fmt.Sprintf("ship: promote %s to %s (%s)", r.App, r.Stage, r.Freight.Short()),
-			"description": description(r),
-			"labels":      Label, "remove_source_branch": true,
+		mr, err := gl.OpenCR(ctx, s.t.EnvRepo, forge.CRSpec{
+			SourceBranch: s.branch, TargetBranch: s.t.TargetBranch,
+			Title:       fmt.Sprintf("ship: promote %s to %s (%s)", r.App, r.Stage, r.Freight.Short()),
+			Description: description(r),
+			Labels:      []string{Label}, RemoveSourceBranch: true,
 		})
 		if err != nil {
 			return driver.Result{}, err
 		}
 		mine = &mr
-		d.Deps.Logf("opened env MR %s", mr.WebURL)
+		d.Deps.Logf("opened env MR %s", mr.URL)
 	} else {
-		d.Deps.Logf("reusing env MR %s", mine.WebURL)
+		d.Deps.Logf("reusing env MR %s", mine.URL)
 	}
-	if err := d.autoMerge(ctx, s.t.EnvRepo, mine.IID); err != nil {
+	if err := d.autoMerge(ctx, s.t.EnvRepo, mine.ID); err != nil {
 		return driver.Result{}, err
 	}
-	return driver.Result{Changed: true, Summary: "env MR " + mine.WebURL, Links: []string{mine.WebURL}}, nil
+	return driver.Result{Changed: true, Summary: "env MR " + mine.URL, Links: []string{mine.URL}}, nil
 }
 
 // autoMerge sets merge-when-pipeline-succeeds, retrying while GitLab is still
 // creating the MR pipeline or computing mergeability.
 func (d Driver) autoMerge(ctx context.Context, project string, iid int) error {
-	gl := d.Deps.GitLab
+	gl := d.Deps.Forge
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		mr, err := gl.MR(ctx, project, iid)
+		mr, err := gl.CR(ctx, project, iid)
 		if err != nil {
 			return err
 		}
-		if mr.State == "merged" || mr.MergeWhenPipelineSucceeds {
+		if mr.State == forge.StateMerged || mr.AutoMerge {
 			return nil
 		}
-		if mr.HeadPipeline != nil {
-			err = gl.AutoMerge(ctx, project, iid, mr.SHA)
+		if mr.Pipeline != nil {
+			err = gl.AutoMerge(ctx, project, iid, mr.HeadSHA)
 			if err == nil {
 				return nil
 			}
@@ -247,28 +246,28 @@ func (d Driver) Wait(ctx context.Context, r driver.Request) (driver.Health, erro
 		if bytes.Equal(s.current, s.rendered) {
 			return driver.Health{Ready: true, Message: fmt.Sprintf("%s@%s has %s", s.t.EnvRepo, s.t.TargetBranch, r.Freight.Short())}, nil
 		}
-		mrs, err := gl.ListMRs(ctx, s.t.EnvRepo, url.Values{"source_branch": {s.branch}, "order_by": {"created_at"}, "sort": {"desc"}})
+		mrs, err := gl.ListCRs(ctx, s.t.EnvRepo, forge.CRQuery{State: forge.StateAll, SourceBranch: s.branch})
 		if err != nil {
 			return driver.Health{}, err
 		}
 		if len(mrs) == 0 {
 			return driver.Health{}, fmt.Errorf("no env MR for branch %s", s.branch)
 		}
-		mr, err := gl.MR(ctx, s.t.EnvRepo, mrs[0].IID)
+		mr, err := gl.CR(ctx, s.t.EnvRepo, mrs[0].ID)
 		if err != nil {
 			return driver.Health{}, err
 		}
 		switch {
-		case mr.State == "closed":
-			return driver.Health{}, fmt.Errorf("env MR %s was closed", mr.WebURL)
+		case mr.State == forge.StateClosed:
+			return driver.Health{}, fmt.Errorf("env MR %s was closed", mr.URL)
 		case mr.HasConflicts:
-			return driver.Health{}, fmt.Errorf("env MR %s has conflicts", mr.WebURL)
-		case mr.HeadPipeline != nil && (mr.HeadPipeline.Status == "failed" || mr.HeadPipeline.Status == "canceled"):
-			return driver.Health{}, fmt.Errorf("env MR %s pipeline %s: %s", mr.WebURL, mr.HeadPipeline.Status, mr.HeadPipeline.WebURL)
+			return driver.Health{}, fmt.Errorf("env MR %s has conflicts", mr.URL)
+		case mr.Pipeline != nil && (mr.Pipeline.Status == forge.RunFailed || mr.Pipeline.Status == forge.RunCanceled):
+			return driver.Health{}, fmt.Errorf("env MR %s pipeline %s: %s", mr.URL, mr.Pipeline.Status, mr.Pipeline.URL)
 		}
-		d.Deps.Logf("waiting for env MR %s (state=%s)", mr.WebURL, mr.State)
+		d.Deps.Logf("waiting for env MR %s (state=%s)", mr.URL, mr.State)
 		if err := sleep(ctx, d.poll()); err != nil {
-			return driver.Health{}, fmt.Errorf("env MR %s not merged: %w", mr.WebURL, err)
+			return driver.Health{}, fmt.Errorf("env MR %s not merged: %w", mr.URL, err)
 		}
 	}
 }

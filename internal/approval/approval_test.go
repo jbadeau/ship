@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jbadeau/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/config"
 )
 
 func cfg(min int) *config.File {
 	return &config.File{
-		GitLab:     config.GitLabConfig{BotUsername: "ship-bot", PromoterUsername: "ship-promoter", ApproverUsername: "ship-approver", LedgerMinApprovals: min},
+		Forge:      config.ForgeConfig{BotUsername: "ship-bot", PromoterUsername: "ship-promoter", ApproverUsername: "ship-approver", LedgerMinApprovals: min},
 		Identities: map[string]string{"alice@bank.example": "alice"},
 	}
 }

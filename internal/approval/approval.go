@@ -10,16 +10,16 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/trailer"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/trailer"
 )
 
 // Facts about one ledger MR.
 type Facts struct {
-	Author     string   // GitLab username of the MR author
+	Author     string   // forge username of the CR author
 	Requesters []string // raw requester identities (Requested-by trailers, Promotion spec)
-	Approvers  []string // GitLab usernames that approved
+	Approvers  []string // forge usernames that approved
 }
 
 type Result struct {
@@ -33,17 +33,17 @@ func (r Result) OK() bool { return r.Violation == "" }
 
 // Check evaluates V8.
 func Check(cfg *config.File, f Facts) Result {
-	r := Result{Excluded: map[string]string{}, Required: cfg.GitLab.LedgerMinApprovals}
+	r := Result{Excluded: map[string]string{}, Required: cfg.Forge.LedgerMinApprovals}
 	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 	requesters := map[string]bool{}
 	for _, q := range f.Requesters {
 		if q != "" {
-			requesters[norm(cfg.GitLabUser(q))] = true
+			requesters[norm(cfg.ForgeUser(q))] = true
 			requesters[norm(q)] = true
 		}
 	}
 	bots := map[string]bool{}
-	for _, b := range cfg.GitLab.ServiceAccounts() {
+	for _, b := range cfg.Forge.ServiceAccounts() {
 		bots[norm(b)] = true
 	}
 	for _, a := range f.Approvers {
@@ -74,18 +74,18 @@ func Check(cfg *config.File, f Facts) Result {
 	return r
 }
 
-// Gather collects Facts for a ledger MR from GitLab. Requesters are the union of
+// Gather collects Facts for a ledger CR from the forge. Requesters are the union of
 // Requested-by trailers in the description and every commit: extra entries can
 // only make V8 stricter. extra adds requesters known from elsewhere (a Promotion CR).
-func Gather(ctx context.Context, gl *gitlab.Client, project string, mr gitlab.MR, extra ...string) (Facts, error) {
-	f := Facts{Author: mr.Author.Username, Requesters: append(trailer.All(mr.Description, "Requested-by"), extra...)}
-	commits, err := gl.MRCommits(ctx, project, mr.IID)
+func Gather(ctx context.Context, fg forge.Forge, project string, mr forge.ChangeRequest, extra ...string) (Facts, error) {
+	f := Facts{Author: mr.Author, Requesters: append(trailer.All(mr.Description, "Requested-by"), extra...)}
+	commits, err := fg.CRCommits(ctx, project, mr.ID)
 	if err != nil {
 		return f, err
 	}
 	for _, c := range commits {
 		f.Requesters = append(f.Requesters, trailer.All(c.Message, "Requested-by")...)
 	}
-	f.Approvers, err = gl.ApprovedBy(ctx, project, mr.IID)
+	f.Approvers, err = fg.Approvers(ctx, project, mr.ID)
 	return f, err
 }

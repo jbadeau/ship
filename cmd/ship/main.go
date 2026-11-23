@@ -10,23 +10,24 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/jbadeau/ship/internal/approval"
-	"github.com/jbadeau/ship/internal/config"
-	"github.com/jbadeau/ship/internal/deploy"
-	"github.com/jbadeau/ship/internal/driver"
-	"github.com/jbadeau/ship/internal/driver/builtin"
-	"github.com/jbadeau/ship/internal/envmr"
-	"github.com/jbadeau/ship/internal/freight"
-	"github.com/jbadeau/ship/internal/gitlab"
-	"github.com/jbadeau/ship/internal/gitx"
-	"github.com/jbadeau/ship/internal/ledger"
-	"github.com/jbadeau/ship/internal/policy"
-	"github.com/jbadeau/ship/internal/promote"
+	"juliusbaer.com/codeak/ship/internal/approval"
+	"juliusbaer.com/codeak/ship/internal/config"
+	"juliusbaer.com/codeak/ship/internal/deploy"
+	"juliusbaer.com/codeak/ship/internal/driver"
+	"juliusbaer.com/codeak/ship/internal/driver/builtin"
+	"juliusbaer.com/codeak/ship/internal/envmr"
+	"juliusbaer.com/codeak/ship/internal/forge"
+	"juliusbaer.com/codeak/ship/internal/freight"
+	"juliusbaer.com/codeak/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/ledger"
+	"juliusbaer.com/codeak/ship/internal/policy"
+	"juliusbaer.com/codeak/ship/internal/promote"
+	"juliusbaer.com/codeak/ship/internal/secret"
 )
 
 var version = "dev"
@@ -50,6 +51,7 @@ CI: env repo
   verify-env-mr  provenance check; approves ship MRs as ship-approver
 Kubernetes
   controller     ship-controller: Promotion CRs -> ledger MRs (+ V8 status check)
+  approver       ship-approver service: env-repo MR webhooks -> verify -> approve
 
 Run 'ship <command> -h' for flags.
 `
@@ -63,12 +65,12 @@ func main() {
 		fmt.Print(usage)
 		return
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cmds := map[string]func(context.Context, []string) error{
 		"promote": cmdPromote, "status": cmdStatus, "history": cmdHistory, "evidence": cmdEvidence,
 		"validate": cmdValidate, "plan": cmdPlan, "deploy": cmdDeploy, "attest": cmdAttest,
-		"verify-env-mr": cmdVerifyEnvMR, "controller": cmdController,
+		"verify-env-mr": cmdVerifyEnvMR, "controller": cmdController, "approver": cmdApprover,
 		"version": func(context.Context, []string) error { fmt.Println(version); return nil },
 	}
 	fn, ok := cmds[os.Args[1]]
@@ -126,18 +128,6 @@ func registry(cfg *config.File) *freight.OCI {
 	}
 	insecure = append(insecure, strings.Split(os.Getenv("SHIP_INSECURE_REGISTRIES"), ",")...)
 	return freight.NewOCI(insecure)
-}
-
-func gitlabClient(tokenEnv string) *gitlab.Client {
-	u := os.Getenv("SHIP_GITLAB_URL")
-	if u == "" {
-		u = os.Getenv("CI_SERVER_URL")
-	}
-	tok := os.Getenv(tokenEnv)
-	if u == "" || tok == "" {
-		return nil
-	}
-	return gitlab.New(u, tok)
 }
 
 func zeroSHA(s string) bool { return strings.Trim(s, "0") == "" }
@@ -288,14 +278,14 @@ func cmdValidate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	var c common
 	c.bind(fs)
-	base := fs.String("base", os.Getenv("CI_MERGE_REQUEST_DIFF_BASE_SHA"), "MR base revision; policy is read from here")
+	base := fs.String("base", ci().BaseSHA, "MR base revision; policy is read from here (CI: the MR diff base)")
 	head := fs.String("head", "HEAD", "MR head revision")
 	format := fs.String("format", "text", "text or json")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if *base == "" {
-		return fmt.Errorf("--base is required (CI_MERGE_REQUEST_DIFF_BASE_SHA in MR pipelines)")
+		return fmt.Errorf("--base is required (set automatically in MR pipelines)")
 	}
 	cfg, repo, err := c.load(*base)
 	if err != nil {
@@ -340,13 +330,20 @@ func deployRunner(ctx context.Context, c common, rev string) (deploy.Runner, str
 		return deploy.Runner{}, "", err
 	}
 	reg := registry(cfg)
-	gl := gitlabClient("SHIP_GITLAB_TOKEN")
+	gl, err := optionalForge(ctx, secret.ForgeToken)
+	if err != nil {
+		return deploy.Runner{}, "", err
+	}
+	sec, err := secrets()
+	if err != nil {
+		return deploy.Runner{}, "", err
+	}
 	prom := driver.Promotion{
-		LedgerProject: os.Getenv("CI_PROJECT_PATH"),
-		PipelineURL:   os.Getenv("CI_PIPELINE_URL"),
+		LedgerProject: ci().Repo,
+		PipelineURL:   ci().RunURL,
 	}
 	if prom.LedgerProject == "" {
-		prom.LedgerProject = cfg.GitLab.LedgerProject
+		prom.LedgerProject = cfg.Forge.LedgerProject
 	}
 	sha, err := repo.Resolve(rev)
 	if err != nil {
@@ -354,10 +351,10 @@ func deployRunner(ctx context.Context, c common, rev string) (deploy.Runner, str
 	}
 	prom.LedgerCommit = sha
 	if gl != nil && prom.LedgerProject != "" {
-		if mrs, err := gl.CommitMRs(ctx, prom.LedgerProject, sha); err == nil {
+		if mrs, err := gl.CRsForCommit(ctx, prom.LedgerProject, sha); err == nil {
 			for _, m := range mrs {
-				if m.State == "merged" {
-					prom.LedgerMR, prom.LedgerMRURL = m.IID, m.WebURL
+				if m.State == forge.StateMerged {
+					prom.LedgerMR, prom.LedgerMRURL = m.ID, m.URL
 					break
 				}
 			}
@@ -365,21 +362,21 @@ func deployRunner(ctx context.Context, c common, rev string) (deploy.Runner, str
 	}
 	return deploy.Runner{
 		Cfg: cfg, Repo: repo, Reg: reg, Driver: builtin.Get, Promotion: prom,
-		Deps: driver.Deps{GitLab: gl, Registry: reg, Log: os.Stderr},
+		Deps: driver.Deps{Forge: gl, Secrets: sec, Registry: reg, Log: os.Stderr},
 	}, sha, nil
 }
 
 // enforceV8 is the post-merge half of V8: refuse to hand pins to drivers unless
 // the ledger MR that produced this commit had independent approval.
 func enforceV8(ctx context.Context, r deploy.Runner) error {
-	gl := r.Deps.GitLab
+	gl := r.Deps.Forge
 	if gl == nil || r.Promotion.LedgerProject == "" {
-		return fmt.Errorf("V8: cannot verify approvals (SHIP_GITLAB_TOKEN / CI_PROJECT_PATH unset); use --require-approval=false only outside CI")
+		return fmt.Errorf("V8: cannot verify approvals (forge URL, forge-token secret or CI project unset); use --require-approval=false only outside CI")
 	}
 	if r.Promotion.LedgerMR == 0 {
 		return fmt.Errorf("V8: commit %s did not come from a merged ledger MR; refusing to deploy", r.Promotion.LedgerCommit)
 	}
-	mr, err := gl.MR(ctx, r.Promotion.LedgerProject, r.Promotion.LedgerMR)
+	mr, err := gl.CR(ctx, r.Promotion.LedgerProject, r.Promotion.LedgerMR)
 	if err != nil {
 		return err
 	}
@@ -389,9 +386,9 @@ func enforceV8(ctx context.Context, r deploy.Runner) error {
 	}
 	res := approval.Check(r.Cfg, facts)
 	if !res.OK() {
-		return fmt.Errorf("ledger MR !%d: %s; refusing to deploy", mr.IID, res.Violation)
+		return fmt.Errorf("ledger MR !%d: %s; refusing to deploy", mr.ID, res.Violation)
 	}
-	fmt.Fprintf(os.Stderr, "V8: ledger MR !%d independently approved by %s\n", mr.IID, strings.Join(res.Independent, ", "))
+	fmt.Fprintf(os.Stderr, "V8: ledger MR !%d independently approved by %s\n", mr.ID, strings.Join(res.Independent, ", "))
 	return nil
 }
 
@@ -406,7 +403,7 @@ func cmdPlan(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	var c common
 	c.bind(fs)
-	base := fs.String("base", os.Getenv("CI_MERGE_REQUEST_DIFF_BASE_SHA"), "base revision")
+	base := fs.String("base", ci().BaseSHA, "base revision")
 	head := fs.String("head", "HEAD", "head revision")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -438,7 +435,7 @@ func cmdDeploy(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	var c common
 	c.bind(fs)
-	base := fs.String("base", os.Getenv("CI_COMMIT_BEFORE_SHA"), "previous revision of the default branch")
+	base := fs.String("base", ci().BeforeSHA, "previous revision of the default branch")
 	head := fs.String("head", "HEAD", "revision to deploy")
 	wait := fs.Duration("wait", 15*time.Minute, "wait for drivers to report healthy (0 = don't wait)")
 	record := fs.Bool("record", true, "push 'deployed' evidence after success")
@@ -518,7 +515,7 @@ func cmdAttest(ctx context.Context, args []string) error {
 	if *stage != "" {
 		ann["ship.dev/stage"] = *stage
 	}
-	if u := os.Getenv("CI_PIPELINE_URL"); u != "" {
+	if u := ci().RunURL; u != "" {
 		ann["ship.dev/pipeline"] = u
 	}
 	for k, v := range extra {
@@ -543,9 +540,8 @@ func cmdAttest(ctx context.Context, args []string) error {
 
 func cmdVerifyEnvMR(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("verify-env-mr", flag.ContinueOnError)
-	iidDefault, _ := strconv.Atoi(os.Getenv("CI_MERGE_REQUEST_IID"))
-	iid := fs.Int("mr", iidDefault, "env MR iid (CI_MERGE_REQUEST_IID)")
-	project := fs.String("project", os.Getenv("CI_PROJECT_PATH"), "env repo project path")
+	iid := fs.Int("mr", ci().CR, "env MR number (set automatically in MR pipelines)")
+	project := fs.String("project", ci().Repo, "env repo path")
 	ledgerProject := fs.String("ledger-project", os.Getenv("SHIP_LEDGER_PROJECT"), "ledger project path")
 	noApprove := fs.Bool("no-approve", false, "check only")
 	if err := parse(fs, args); err != nil {
@@ -554,16 +550,28 @@ func cmdVerifyEnvMR(ctx context.Context, args []string) error {
 	if *iid == 0 || *project == "" || *ledgerProject == "" {
 		return fmt.Errorf("--mr, --project and --ledger-project (SHIP_LEDGER_PROJECT) are required")
 	}
-	gl := gitlabClient("SHIP_APPROVER_TOKEN")
-	if gl == nil {
-		return fmt.Errorf("SHIP_APPROVER_TOKEN and SHIP_GITLAB_URL/CI_SERVER_URL are required")
+	// With --no-approve a read-only token is enough (and is what env-repo CI gets:
+	// the approver token lives only in `ship approver`, docs/approver-service.md).
+	name := secret.ForgeApproverToken
+	if *noApprove {
+		if sec, err := secrets(); err == nil && sec.Has(ctx, secret.ForgeReadToken) {
+			name = secret.ForgeReadToken
+		}
 	}
-	v, err := envmr.Verifier{GitLab: gl, Reg: registry(nil), LedgerProject: *ledgerProject, EnvProject: *project}.Verify(ctx, *iid, !*noApprove)
+	gl, err := forgeClient(ctx, name)
+	if err != nil {
+		return err
+	}
+	v, err := envmr.Verifier{Forge: gl, Reg: registry(nil), LedgerProject: *ledgerProject, EnvProject: *project}.Verify(ctx, *iid, !*noApprove)
 	if err != nil {
 		return err
 	}
 	if !v.ShipMR {
 		fmt.Println("not a ship MR (source branch is not ship/…): normal approval rules apply")
+		return nil
+	}
+	if v.State != forge.StateOpen {
+		fmt.Printf("MR is %s: nothing to verify\n", v.State)
 		return nil
 	}
 	for _, c := range v.Checks {

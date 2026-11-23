@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jbadeau/ship/internal/gitx"
+	"juliusbaer.com/codeak/ship/internal/gitx"
 )
 
 // Pin is the content of a pin file. It is deliberately a single field:

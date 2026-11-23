@@ -29,7 +29,7 @@ func TestDriverConfig(t *testing.T) {
 	if c["envRepo"] != "sda/services/SV-API_GW_MGT/PROD" || c["path"] != "prod-claim.yaml" || c["mapping"] != "m.yaml" {
 		t.Fatalf("got %v", c)
 	}
-	if f.LedgerDir != "ledger" || f.GitLab.LedgerMinApprovals != 1 {
+	if f.LedgerDir != "ledger" || f.Forge.LedgerMinApprovals != 1 {
 		t.Fatalf("defaults not applied: %+v", f)
 	}
 }
@@ -106,5 +106,20 @@ func TestTemplates(t *testing.T) {
 	}
 	if _, err := Parse([]byte(strings.Replace(templated, "template: service }", "template: nope }", 1))); err == nil {
 		t.Error("expected unknown template error")
+	}
+}
+
+func TestForgeSection(t *testing.T) {
+	f, err := Parse([]byte(valid + "forge:\n  botUsername: ship-bot\n  ledgerMinApprovals: 2\n"))
+	if err != nil || f.Forge.Type != "gitlab" || f.Forge.BotUsername != "ship-bot" || f.Forge.LedgerMinApprovals != 2 {
+		t.Fatalf("forge: %+v %v", f, err)
+	}
+	// Deprecated spelling still works.
+	f, err = Parse([]byte(valid + "gitlab:\n  botUsername: legacy-bot\n"))
+	if err != nil || f.Forge.BotUsername != "legacy-bot" || f.Forge.LedgerMinApprovals != 1 || f.LegacyGitLab != nil {
+		t.Fatalf("legacy gitlab: %+v %v", f, err)
+	}
+	if _, err := Parse([]byte(valid + "forge:\n  botUsername: a\ngitlab:\n  botUsername: b\n")); err == nil {
+		t.Fatal("both forge and gitlab accepted")
 	}
 }
