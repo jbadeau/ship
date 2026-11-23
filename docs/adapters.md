@@ -300,7 +300,7 @@ own. Steps 4–6 depend on the answers below.
 - **`internal/forge/forges`**: selects the adapter from `SHIP_FORGE` (default:
   detected from CI, else `gitlab`) and `SHIP_FORGE_URL` (`SHIP_GITLAB_URL` is
   still accepted).
-- **`internal/forge/forgetest`**: the shared contract suite. `make forgetest`
+- **`internal/forge/forgetest`**: the shared contract suite. `mise run forgetest`
   runs it against the sandbox GitLab. On its first run it found a real bug:
   committing to an existing branch sent an empty `start_branch`, which GitLab
   rejects.

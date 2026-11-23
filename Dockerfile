@@ -1,5 +1,5 @@
 # ship CI image: the ship CLI plus git (ledger history) and shell tooling.
-# Binaries are built on the host (make image) to keep the image build offline-friendly.
+# Binaries are built on the host (mise run image) to keep the image build offline-friendly.
 FROM alpine:3.22
 RUN apk add --no-cache git bash curl jq ca-certificates
 ARG TARGETARCH

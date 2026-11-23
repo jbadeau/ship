@@ -1,0 +1,57 @@
+[tools]
+go = "1.27"
+
+[env]
+IMAGE = "{{ get_env(name='IMAGE', default='ship:dev') }}"
+
+[tasks.test]
+description = "Vet and unit tests (in-memory OCI registry, scratch git repos, API fakes)"
+run = ["go vet ./...", "go test ./..."]
+
+[tasks.build]
+description = "Build dist/ship for the host"
+run = "go build -o dist/ship ./cmd/ship"
+
+[tasks.image]
+description = "Build the linux binaries and the ship image ($IMAGE, $ARCH defaults to go env GOARCH)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+ARCH=${ARCH:-$(go env GOARCH)}
+for bin in cmd/ship e2e/tools/pushfreight e2e/tools/fakes; do
+  CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH go build -o "dist/linux-$ARCH/$(basename $bin)" "./$bin"
+done
+docker build --build-arg TARGETARCH="$ARCH" -t "$IMAGE" .
+'''
+
+[tasks.forgetest]
+description = "Shared forge contract suite (internal/forge/forgetest) against the sandbox GitLab"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+set -a; . e2e/.state.env; set +a
+SHIP_FORGETEST_GITLAB_URL=http://localhost:8929 SHIP_FORGETEST_GITLAB_TOKEN=$ROOT_TOKEN \
+  go test -count=1 -run TestForgeContract -v ./internal/gitlab
+'''
+
+[tasks."e2e:up"]
+description = "Start GitLab CE + runner + registry + k3s (docker compose, ~2 min first boot)"
+dir = "e2e"
+run = "docker compose up -d --wait"
+
+[tasks."e2e:bootstrap"]
+description = "Users, tokens, groups, ledger + env repos, runner, CRD + controller, approver + fakes"
+depends = ["image"]
+dir = "e2e"
+run = "./bootstrap.sh"
+
+[tasks."e2e:run"]
+description = "Run the scenario in e2e/scenario.sh (~6 min, 47 checks)"
+depends = ["image"]
+dir = "e2e"
+run = "./run-scenario.sh"
+
+[tasks."e2e:down"]
+description = "Remove the sandbox, including volumes"
+dir = "e2e"
+run = "docker compose down -v"
